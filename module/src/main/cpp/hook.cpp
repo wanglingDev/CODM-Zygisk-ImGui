@@ -199,7 +199,7 @@ void *hack_thread(void *arg) {
     LOGI("[ENI] il2cpp base: 0x%" PRIxPTR, (uintptr_t)g_il2cppBaseMap.startAddress);
     Pointers();
     Hooks();
-    InstallFeatureHooks();
+    InitPatches();   // MemoryPatch objects for NoRecoil/NoSpread/HighJump (safe, no Dobby on tiny funcs)
 
     // ── eglSwapBuffers via Dobby inline hook ──────────────────────
     InstallEGLHook();

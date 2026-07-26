@@ -493,6 +493,12 @@ EGLBoolean hook_eglSwapBuffers(EGLDisplay display, EGLSurface surface) {
     if (verbose) LOGI("[ENI] frame %d: DrawMenu", g_frame_count);
     DrawMenu();
 
+    // ESP, aimbot, and patch ticks — all default-off, guarded by their own booleans
+    ImDrawList* bgDL = ImGui::GetBackgroundDrawList();
+    DrawESP(bgDL, (float)g_width, (float)g_height);
+    AimbotTick((float)g_width, (float)g_height);
+    TickPatches();
+
     if (verbose) LOGI("[ENI] frame %d: Render", g_frame_count);
     ImGui::Render();
     ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
@@ -504,5 +510,3 @@ EGLBoolean hook_eglSwapBuffers(EGLDisplay display, EGLSurface surface) {
         return orig_eglSwapBuffers(display, surface);
     return EGL_TRUE;
 }
-
-

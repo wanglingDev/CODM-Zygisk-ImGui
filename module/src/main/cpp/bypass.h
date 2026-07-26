@@ -1112,9 +1112,15 @@ static void RunFullBypass() {
     // ── Kill inotify watches (after ACE has set them up) ─────────────────────
     Surface_KillInotifyWatches();
 
-    // ── Surface remap last: ACE is neutered, remap can't be caught now ────────
-    sleep(1);
-    Surface_Remap();
+    // NOTE: Surface_Remap() intentionally removed.
+    // It called mremap() on our own .so text segments while code from those
+    // same pages was still executing → SIGSEGV (logcat confirmed: bypass never
+    // reached "[BYPASS] Complete" log, crash happened inside Surface_Remap).
+    // Stealth is already fully handled by AndKittyInjector at inject time:
+    //   • soinfo removed from linker list
+    //   • segments remapped anonymously
+    //   • ELF header randomized
+    // Re-remapping here is redundant and lethal.
 
     LOGI("[BYPASS] ═══ Full 13-Tier Bypass Complete ═══");
 }
