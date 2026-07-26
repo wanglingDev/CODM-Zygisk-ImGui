@@ -82,19 +82,63 @@ HOOKAF(int32_t, Consume, void *thiz, void *arg1, bool arg2, long arg3, uint32_t 
 #include "menu.h"
 
 void *hack_thread(void *arg) {
-    LOGI("[ENI] hack_thread: started, waiting for libil2cpp.so...");
+    LOGI("[ENI] hack_thread: started, scanning for il2cpp library...");
 
-    // Wait up to 60 s for the game to load libil2cpp.so
+    // Garena CODM sometimes names the IL2CPP library differently.
+    // Try all known names; log every loaded .so every 10 s so we can diagnose.
+    static const char* IL2CPP_CANDIDATES[] = {
+        "libil2cpp.so",
+        "libGameAssembly.so",
+        "libCODM.so",
+        "libcodm.so",
+        "libUE4.so",  // unlikely but included
+        nullptr
+    };
+
     int wait_iters = 0;
-    do {
+    while (!g_il2cppBaseMap.isValid() && wait_iters < 90) {
         sleep(1);
-        g_il2cppBaseMap = KittyMemory::getLibraryBaseMap("libil2cpp.so");
-        if (++wait_iters % 5 == 0)
-            LOGI("[ENI] hack_thread: still waiting for il2cpp (%ds)...", wait_iters);
-    } while (!g_il2cppBaseMap.isValid() && wait_iters < 60);
+        ++wait_iters;
+
+        // Try each candidate name
+        for (int ci = 0; IL2CPP_CANDIDATES[ci]; ci++) {
+            g_il2cppBaseMap = KittyMemory::getLibraryBaseMap(IL2CPP_CANDIDATES[ci]);
+            if (g_il2cppBaseMap.isValid()) {
+                LOGI("[ENI] il2cpp library found as '%s'", IL2CPP_CANDIDATES[ci]);
+                break;
+            }
+        }
+
+        // Every 10 s, dump all game .so files to logcat for diagnosis
+        if (wait_iters % 10 == 0) {
+            LOGI("[ENI] still searching... (%ds) — dumping loaded libs:", wait_iters);
+            FILE* maps = fopen("/proc/self/maps", "r");
+            if (maps) {
+                char line[512];
+                char last_lib[512] = "";
+                while (fgets(line, sizeof(line), maps)) {
+                    // only print executable .so segments, skip system libs
+                    if (!strstr(line, ".so")) continue;
+                    if (strstr(line, "/system/") || strstr(line, "/vendor/") ||
+                        strstr(line, "/apex/")   || strstr(line, "bionic")) continue;
+                    char* slash = strrchr(line, '/');
+                    if (!slash) continue;
+                    // deduplicate consecutive same-lib lines
+                    slash++;
+                    char* nl = strchr(slash, '\n');
+                    if (nl) *nl = 0;
+                    if (strcmp(slash, last_lib) != 0) {
+                        LOGI("[ENI]   lib: %s", slash);
+                        strncpy(last_lib, slash, sizeof(last_lib)-1);
+                    }
+                }
+                fclose(maps);
+            }
+        }
+    }
 
     if (!g_il2cppBaseMap.isValid()) {
-        LOGE("[ENI] hack_thread: libil2cpp.so not found after 60 s — aborting");
+        LOGE("[ENI] FATAL: il2cpp library not found after 90 s — check logcat lib dump above");
         return nullptr;
     }
 
