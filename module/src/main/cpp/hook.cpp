@@ -237,15 +237,23 @@ int isGame(JNIEnv *env, jstring appDataDir) {
 
 // ── Input hooks ───────────────────────────────────────────────────
 HOOKAF(void, Input, void *thiz, void *ex_ab, void *ex_ac) {
-    origInput(thiz, ex_ab, ex_ac);
+    // FIXED: ImGui processes touch FIRST.
+    // Old order (game first) meant origInput already consumed the event
+    // before ImGui saw it — logo button taps landed as game actions,
+    // ImGui never got a clean ACTION_DOWN/UP cycle → stuck MouseDown[0].
     ImGui_ImplAndroid_HandleInputEvent((AInputEvent*)thiz);
+    // Only pass to game if ImGui is NOT capturing this touch point.
+    if (!ImGui::GetIO().WantCaptureMouse)
+        origInput(thiz, ex_ab, ex_ac);
 }
 
 HOOKAF(int32_t, Consume, void *thiz, void *arg1, bool arg2, long arg3,
        uint32_t *arg4, AInputEvent **input_event) {
-    // Forward ke ImGui SEBELUM game consume — koordinat masih raw
     if (input_event && *input_event) {
         ImGui_ImplAndroid_HandleInputEvent(*input_event);
+        // Block game from consuming touch events that ImGui owns
+        if (ImGui::GetIO().WantCaptureMouse)
+            return 0;
     }
     return origConsume(thiz, arg1, arg2, arg3, arg4, input_event);
 }

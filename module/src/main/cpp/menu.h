@@ -189,9 +189,70 @@ static bool NeonToggle_retval(const char* label, bool* v, ImVec4 onColor = {0.f,
 // ════════════════════════════════════════════════════════════════
 static void DrawMenu() {
     static bool showMenu = true;
+    static float logoX  = sw * 0.82f;
+    static float logoY  = sh * 0.06f;
 
-    // Volume-down toggle (ImGuiKey_Menu = hardware menu btn)
+    // Hardware menu button toggle
     if (ImGui::IsKeyPressed(ImGuiKey_Menu)) showMenu = !showMenu;
+
+    // ── Persistent logo button (always visible) ───────────────────
+    // Rendered before the !showMenu guard so it stays on screen
+    // even when the main menu is closed.
+    {
+        ImGui::SetNextWindowPos({ logoX, logoY }, ImGuiCond_Always);
+        ImGui::SetNextWindowSize({ 58.f, 58.f }, ImGuiCond_Always);
+        ImGui::SetNextWindowBgAlpha(0.82f);
+        ImGuiWindowFlags lf =
+            ImGuiWindowFlags_NoTitleBar    | ImGuiWindowFlags_NoScrollbar |
+            ImGuiWindowFlags_NoResize      | ImGuiWindowFlags_NoDecoration |
+            ImGuiWindowFlags_NoSavedSettings;
+
+        ImGui::PushStyleColor(ImGuiCol_WindowBg,
+            showMenu ? ImVec4(0.f,0.55f,0.7f,0.85f)   // cyan when open
+                     : ImVec4(0.05f,0.05f,0.1f,0.82f)); // dark when closed
+        ImGui::PushStyleColor(ImGuiCol_Border,
+            ImVec4(0.f, 1.f, 1.f, showMenu ? 0.9f : 0.35f));
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 12.f);
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 1.5f);
+
+        ImGui::Begin("##logo_btn", nullptr, lf);
+
+        // Make whole window draggable + clickable
+        ImGui::SetCursorPos({ 4.f, 4.f });
+        ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(0,0,0,0));
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.f,1.f,1.f,0.15f));
+        ImGui::PushStyleColor(ImGuiCol_ButtonActive,  ImVec4(0.f,1.f,1.f,0.35f));
+        ImGui::PushStyleColor(ImGuiCol_Text,          ImVec4(0.f,1.f,1.f,1.f));
+
+        bool clicked = ImGui::Button(showMenu ? "  ✕  \n★ENI" : " ★ENI \n MENU",
+                                     { 50.f, 50.f });
+
+        ImGui::PopStyleColor(4);
+        ImGui::End();
+
+        ImGui::PopStyleVar(2);
+        ImGui::PopStyleColor(2);
+
+        // Dragging support — move logo around screen
+        if (ImGui::IsItemHovered()) {
+            ImVec2 drag = ImGui::GetMouseDragDelta(0, 2.f);
+            if (drag.x != 0 || drag.y != 0) {
+                logoX += drag.x; logoY += drag.y;
+                ImGui::ResetMouseDragDelta(0);
+                clicked = false; // drag, not click
+            }
+        }
+
+        if (clicked) {
+            showMenu = !showMenu;
+            // STUCK MOUSE FIX: when toggling, force-reset MouseDown[0].
+            // Without this, ACTION_UP from the tap is sometimes consumed
+            // by the game before ImGui sees it → io.MouseDown[0] stays true
+            // → every subsequent button appears "held" and won't click.
+            ImGui::GetIO().AddMouseButtonEvent(0, false);
+        }
+    }
+
     if (!showMenu) return;
 
     ImGuiIO& io = ImGui::GetIO();
