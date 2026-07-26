@@ -20,10 +20,9 @@
 #include "KittyMemory/KittyScanner.h"
 #include "KittyMemory/KittyUtils.h"
 // ── ShadowHook replaces Dobby ──────────────────────────────────────
-#include "shadowhook.h"
-#include "bypass_anogs.h"
+
 // ── xDL for solist manipulation + stealth dlopen ──────────────────
-#include "xdl.h"
+
 #include "Include/Unity.h"
 #include "Misc.h"
 #include "hook.h"
@@ -106,38 +105,13 @@ void bypass_remap_self() {
     LOGI("[ENI] bypass L1+L2: remap+ELF wipe done");
 }
 
-// ── Layer 3: xDL solist removal ───────────────────────────────────
-// xDL exposes xdl_open which bypasses linker namespace and returns
-// a handle we can use to walk + unlink our soinfo entry.
-// We use a simpler but effective approach: open ourselves via xdl,
-// then call xdl_close — xDL's internals will clean up the reference.
-// For full soinfo unlinking we walk the solist manually.
+// ── Layer 3: solist removal (manual walk) ────────────────────────
 static void bypass_hide_soinfo() {
-    // Strategy: use xdl_addr on our own function to get our lib path,
-    // then force-open with RTLD_NOLOAD to confirm we're loaded,
-    // then manipulate the solist next-pointer to unlink us.
-
     Dl_info di;
     if (!dladdr((void*)bypass_hide_soinfo, &di) || !di.dli_fname) {
-        LOGI("[ENI] bypass L3: dladdr failed, skip soinfo hide");
+        LOGI("[ENI] bypass L3: dladdr failed");
         return;
     }
-
-    // xDL enhanced open — bypasses Android 7+ namespace restrictions
-    void* xhandle = xdl_open(di.dli_fname, XDL_DEFAULT);
-    if (!xhandle) {
-        LOGI("[ENI] bypass L3: xdl_open failed (%s)", di.dli_fname);
-        return;
-    }
-
-    // Walk /proc/self/maps to confirm we're anonymous after remap
-    // then use xdl to verify our symbol is still callable
-    xdl_info_t xinfo;
-    if (xdl_info(xhandle, XDL_DI_DLINFO, &xinfo) == 0) {
-        LOGI("[ENI] bypass L3: xdl confirmed lib @ %p (%s)",
-             xinfo.dli_fbase, xinfo.dli_fname ? xinfo.dli_fname : "anonymous");
-    }
-    xdl_close(xhandle);
 
     // Manual solist walk — unlink our soinfo from the chain
     // Works on Android 5-16 (solist is always at a fixed linker symbol)
@@ -234,18 +208,9 @@ static void RunAllBypasses() {
 //  SHADOWHOOK — replaces Dobby for all hooks
 //  Island trampoline = no detectable byte patches at hook site
 // ══════════════════════════════════════════════════════════════════
-static bool g_shadowhook_inited = false;
-
-static void InitShadowHook() {
-    if (g_shadowhook_inited) return;
-    int r = shadowhook_init(SHADOWHOOK_MODE_UNIQUE, false);
-    LOGI("[ENI] shadowhook_init: %d (%s)", r, r == 0 ? "OK" : shadowhook_to_errmsg(r));
-    g_shadowhook_inited = (r == 0);
-}
-
-// Wrapper macro: same call-site as DobbyHook was
-#define SHHook(addr, fn, orig) \
-    shadowhook_hook_func_addr((void*)(addr), (void*)(fn), (void**)(orig))
+// Using Dobby for all hooks
+#define SHHook(addr, fn, orig) DobbyHook((void*)(addr), (void*)(fn), (void**)(orig))
+static void InitShadowHook() { LOGI("[ENI] Dobby hook mode active"); }
 
 // ══════════════════════════════════════════════════════════════════
 //  GAME LOGIC
@@ -292,14 +257,7 @@ HOOKAF(int32_t, Consume, void *thiz, void *arg1, bool arg2, long arg3,
 // ══════════════════════════════════════════════════════════════════
 void *hack_thread(void *arg) {
     RunAllBypasses();
-    InitShadowHook();   // init shadowhook after bypass
-
-    pthread_t anogs_tid;
-pthread_create(&anogs_tid, nullptr, [](void*) -> void* {
-    InstallAnogsHooks();
-    return nullptr;
-}, nullptr);
-pthread_detach(anogs_tid);
+    InitShadowHook(); // init hook mode
 
     LOGI("[ENI] hack_thread: scanning for il2cpp...");
 
@@ -347,18 +305,18 @@ pthread_detach(anogs_tid);
 
     // ── eglSwapBuffers — hook via ShadowHook ────────────────────
     void* eglSwap = nullptr;
-    void* eglLib  = xdl_open("libEGL.so", XDL_DEFAULT);
+    void* eglLib = dlopen("libEGL.so", RTLD_LAZY | RTLD_NOLOAD);
     if (eglLib) {
-        eglSwap = xdl_sym(eglLib, "eglSwapBuffers", nullptr);
-        if (eglSwap) LOGI("[ENI] eglSwapBuffers via xdl @ %p", eglSwap);
-        xdl_close(eglLib);
+        eglSwap = dlsym(eglLib, "eglSwapBuffers");
+        if (eglSwap) LOGI("[ENI] eglSwapBuffers via libEGL @ %p", eglSwap);
+        dlclose(eglLib);
     }
     if (!eglSwap) {
-        void* uLib = xdl_open("libunity.so", XDL_DEFAULT);
+        void* uLib = dlopen("libunity.so", RTLD_LAZY | RTLD_NOLOAD);
         if (uLib) {
-            eglSwap = xdl_sym(uLib, "eglSwapBuffers", nullptr);
-            if (eglSwap) LOGI("[ENI] eglSwapBuffers via xdl(unity) @ %p", eglSwap);
-            xdl_close(uLib);
+            eglSwap = dlsym(uLib, "eglSwapBuffers");
+            if (eglSwap) LOGI("[ENI] eglSwapBuffers via libunity @ %p", eglSwap);
+            dlclose(uLib);
         }
     }
 
@@ -377,26 +335,24 @@ pthread_detach(anogs_tid);
     #define LIBINPUT "/system/lib/libinput.so"
 #endif
 
-    void* libinput = xdl_open(LIBINPUT, XDL_DEFAULT);
+    void* libinput = dlopen(LIBINPUT, RTLD_LAZY | RTLD_NOLOAD);
     if (libinput) {
-        void* sym = xdl_sym(libinput,
-            "_ZN7android13InputConsumer21initializeMotionEventEPNS_11MotionEventEPKNS_12InputMessageE",
-            nullptr);
+        void* sym = dlsym(libinput,
+            "_ZN7android13InputConsumer21initializeMotionEventEPNS_11MotionEventEPKNS_12InputMessageE");
         if (sym) {
-            void* s = SHHook(sym, myInput, &origInput);
-            LOGI("[ENI] initializeMotionEvent: %s", s?"OK":"FAILED");
+            int r = SHHook(sym, myInput, &origInput);
+            LOGI("[ENI] initializeMotionEvent: %s", r==0?"OK":"FAILED");
         }
 
-        sym = xdl_sym(libinput,
-            "_ZN7android13InputConsumer7consumeEPNS_26InputEventFactoryInterfaceEblPjPPNS_10InputEventE",
-            nullptr);
+        sym = dlsym(libinput,
+            "_ZN7android13InputConsumer7consumeEPNS_26InputEventFactoryInterfaceEblPjPPNS_10InputEventE");
         if (sym) {
-            void* s = SHHook(sym, myConsume, &origConsume);
-            LOGI("[ENI] consume hook: %s", s?"OK":"FAILED");
+            int r = SHHook(sym, myConsume, &origConsume);
+            LOGI("[ENI] consume hook: %s", r==0?"OK":"FAILED");
         }
-        xdl_close(libinput);
+        dlclose(libinput);
     } else {
-        LOGI("[ENI] libinput xdl_open failed (non-fatal)");
+        LOGI("[ENI] libinput dlopen failed (non-fatal)");
     }
 
     LOGI("[ENI] hack_thread: setup complete!");

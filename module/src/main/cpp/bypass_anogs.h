@@ -1,11 +1,12 @@
 #pragma once
+#include "dobby.h"
 #include <android/log.h>
 #include <dlfcn.h>
 #include <unistd.h>
 #include <cstring>
 #include <cstdlib>
 #include <cinttypes>
-#include "shadowhook.h"
+
 
 #ifndef LOGI
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO,  "zyCheats", __VA_ARGS__)
@@ -169,13 +170,13 @@ static void InstallAnogsHooks() {
 
     LOGI("[BYPASS] libanogs.so found, installing hooks...");
 
-    // Macro: hook by symbol name via ShadowHook
-    #define _AH(sym, hook, orig) do { \
+    // Macro: hook by symbol name via Dobby
+    #define _AH(sym, hook_fn, orig) do { \
         void* _f = dlsym(lib, sym "@@ANO"); \
         if (!_f) _f = dlsym(lib, sym); \
         if (_f) { \
-            void* _s = shadowhook_hook_func_addr(_f, (void*)(hook), (void**)&(orig)); \
-            LOGI("[BYPASS] " sym ": %s", _s ? "OK" : shadowhook_to_errmsg(shadowhook_get_errno())); \
+            int _r = DobbyHook(_f, (void*)(hook_fn), (void**)&(orig)); \
+            LOGI("[BYPASS] " sym ": %s", _r == 0 ? "OK" : "FAIL"); \
         } else { \
             LOGE("[BYPASS] " sym ": symbol not found"); \
         } \

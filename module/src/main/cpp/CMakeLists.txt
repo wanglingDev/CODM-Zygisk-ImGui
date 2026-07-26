@@ -23,18 +23,15 @@ endif ()
 
 set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} ${C_FLAGS}")
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${C_FLAGS} ${CXX_FLAGS}")
-
 set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} ${LINKER_FLAGS}")
 set(CMAKE_MODULE_LINKER_FLAGS "${CMAKE_MODULE_LINKER_FLAGS} ${LINKER_FLAGS}")
 
-# ── Prebuilt static libs ──────────────────────────────────────────
 set(DOBBY_LIB ${CMAKE_CURRENT_SOURCE_DIR}/libs/${CMAKE_ANDROID_ARCH_ABI}/libdobby.a)
-set(CURL_LIB  ${CMAKE_CURRENT_SOURCE_DIR}/libs/${CMAKE_ANDROID_ARCH_ABI}/libcurl.a)
 
+include_directories(Includes/Dobby)
 include_directories(KittyMemory)
 include_directories(Include)
 include_directories(Includes)
-include_directories(Includes/Dobby)
 include_directories(ImGui)
 include_directories(ImGui/backends)
 
@@ -57,6 +54,7 @@ add_library(${MODULE_NAME}
         hook.cpp
         )
 
+set(CURL_LIB ${CMAKE_CURRENT_SOURCE_DIR}/libs/${CMAKE_ANDROID_ARCH_ABI}/libcurl.a)
 find_library(log-lib log)
 find_library(egl EGL)
 find_library(android android)
@@ -76,17 +74,16 @@ endif ()
 target_link_libraries(
         ${MODULE_NAME}
         log
-        # ── Prebuilt static ────────────────────────────────────────
-        ${DOBBY_LIB}
         ${CURL_LIB}
-        # ── System libs ────────────────────────────────────────────
         ${OPENGL_LIB}
         ${GLESV2_LIB}
         ${android}
         ${egl}
+        ${DOBBY_LIB}
 )
 
 if (NOT CMAKE_BUILD_TYPE STREQUAL "Debug")
     add_custom_command(TARGET ${MODULE_NAME} POST_BUILD
-            COMMAND ${CMAKE_STRIP} --strip-all --remove-section=.comment "${CMAKE_LIBRARY_OUTPUT_DIRECTORY}/lib${MODULE_NAME}.so")
+            COMMAND ${CMAKE_STRIP} --strip-all --remove-section=.comment
+            "${CMAKE_LIBRARY_OUTPUT_DIRECTORY}/lib${MODULE_NAME}.so")
 endif ()

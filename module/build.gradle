@@ -11,11 +11,6 @@ android {
     defaultConfig {
         minSdkVersion rootProject.ext.minSdkVersion
         targetSdkVersion rootProject.ext.targetSdkVersion
-        // ShadowHook + ByteHook only ship armeabi-v7a and arm64-v8a.
-        // x86/x86_64 = emulator-only; no real CODM device runs those.
-        ndk {
-            abiFilters 'armeabi-v7a', 'arm64-v8a'
-        }
         externalNativeBuild {
             cmake {
                 arguments "-DMODULE_NAME:STRING=$moduleLibraryName"
@@ -25,7 +20,7 @@ android {
         }
     }
     buildFeatures {
-        prefab false
+        prefab true
     }
     externalNativeBuild {
         cmake {
@@ -38,16 +33,16 @@ android {
             minifyEnabled true
         }
     }
-    // All deps statically linked via libdobby.a — no .so packaging needed
 }
 
 repositories {
-    mavenCentral()
     mavenLocal()
+    mavenCentral()
 }
 
 dependencies {
-    // All native deps (Dobby, curl) are prebuilt .a in libs/ — no AAR needed
+    // xDL — enhanced dlopen/dlsym + solist manipulation
+    // ShadowHook — stealth inline hook (island trampoline, less detectable than Dobby)
 }
 
 afterEvaluate {
@@ -105,6 +100,10 @@ afterEvaluate {
         task("push${variantCapped}", type: Exec) {
             dependsOn("zip${variantCapped}")
             workingDir outDir
+            // android.adbExecutable is null when SDK platform-tools aren't found,
+            // which throws NullPointerException during project configuration.
+            // Resolve ADB safely: fall back to PATH lookup so the task is always
+            // registered (even if ADB is absent), and fail at execution time instead.
             def adb = 'adb'; try { if (android.adbExecutable) adb = android.adbExecutable.toString() } catch(e) {}
             commandLine adb, "push", zipName, "/data/local/tmp/"
         }
