@@ -451,15 +451,15 @@ EGLBoolean hook_eglSwapBuffers(EGLDisplay display, EGLSurface surface) {
         io.DisplaySize = { (float)g_width, (float)g_height };
         io.IniFilename = nullptr;
 
-        // Load font
-        extern unsigned int Roboto_Regular_compressed_data[];
-        extern unsigned int Roboto_Regular_compressed_size;
+        // Load font — Roboto_Regular[] defined in Include/Roboto-Regular.h
+        // included by hook.cpp before menu.h, so symbol is visible here.
         ImFontConfig fc;
         fc.FontDataOwnedByAtlas = false;
-        float fontSize = (float)g_height * 0.022f; // ~2.2% of screen height
-        io.Fonts->AddFontFromMemoryCompressedTTF(
-            Roboto_Regular_compressed_data,
-            (int)Roboto_Regular_compressed_size,
+        float fontSize = (float)g_height * 0.022f;
+        extern unsigned char Roboto_Regular[];
+        io.Fonts->AddFontFromMemoryTTF(
+            Roboto_Regular,
+            168260,
             fontSize, &fc);
         io.Fonts->Build();
 
