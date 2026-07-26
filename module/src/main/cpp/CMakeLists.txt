@@ -84,10 +84,10 @@ endif (${ANDROID_PLATFORM_LEVEL} LESS 12)
 target_link_libraries(
         ${MODULE_NAME}
         log
-        # ── Prefab libs (Dobby is gone) ────────────────────────────
-        xdl::xdl
-        shadowhook::shadowhook
-        bytehook::bytehook
+        # ── Prefab libs — STATIC so no runtime .so deps ────────────
+        xdl::xdl_static
+        shadowhook::shadowhook_static
+        bytehook::bytehook_static
         # ── Static libs ────────────────────────────────────────────
         ${CURL_LIB}
         # ── System libs ────────────────────────────────────────────

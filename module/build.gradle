@@ -39,11 +39,10 @@ android {
         }
     }
     packagingOptions {
-        // avoid duplicate .so conflicts when xdl/shadowhook/bytehook
-        // are pulled in as transitive deps by other modules
-        pickFirst '**/libxdl.so'
-        pickFirst '**/libshadowhook.so'
-        pickFirst '**/libbytehook.so'
+        // deps are statically linked — exclude shared .so from APK/module zip
+        exclude '**/libxdl.so'
+        exclude '**/libshadowhook.so'
+        exclude '**/libbytehook.so'
     }
 }
 
