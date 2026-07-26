@@ -12,8 +12,8 @@ message("Build type: ${CMAKE_BUILD_TYPE}")
 
 set(CMAKE_CXX_STANDARD 20)
 
-set(LINKER_FLAGS "-ffixed-x18 -Wl,--hash-style=both")
-set(C_FLAGS "-Werror=format -fdata-sections -ffunction-sections -lz")
+set(LINKER_FLAGS "-ffixed-x18 -Wl,--hash-style=both -lz")
+set(C_FLAGS "-Werror=format -fdata-sections -ffunction-sections")
 set(CXX_FLAGS "${CXX_FLAGS} -fno-exceptions -fno-rtti")
 
 if (NOT CMAKE_BUILD_TYPE STREQUAL "Debug")
