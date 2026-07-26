@@ -1,5 +1,7 @@
 #pragma once
 #include <cinttypes>
+#include <pthread.h>
+#include <GLES3/gl3.h>
 #include <cmath>
 #include <EGL/egl.h>
 #include <GLES2/gl2.h>
@@ -440,9 +442,35 @@ static void AimbotTick(float sw, float sh) {
 // ════════════════════════════════════════════════════════════════
 //  EGL SWAP HOOK IMPLEMENTATION
 // ════════════════════════════════════════════════════════════════
-static int g_frame_count = 0;
+static int            g_frame_count  = 0;
+static pthread_mutex_t g_render_mutex = PTHREAD_MUTEX_INITIALIZER;
+// Only the thread that owns the EGL context should render.
+// Store it on first call; subsequent calls from other threads
+// (e.g. concurrent Zygisk forks) are forwarded straight to orig.
+static pthread_t      g_render_tid   = 0;
 
 EGLBoolean hook_eglSwapBuffers(EGLDisplay display, EGLSurface surface) {
+    // ── Thread ownership guard ────────────────────────────────────
+    // Multiple zygote forks = multiple constructors = multiple hook
+    // calls from different threads. ImGui is NOT thread-safe.
+    // Only the first thread that enters gets to render; others pass through.
+    pthread_t self = pthread_self();
+    if (g_render_tid == 0)
+        g_render_tid = self;                     // claim render thread
+    if (g_render_tid != self) {
+        // Not our thread — forward and bail
+        if (orig_eglSwapBuffers)
+            return orig_eglSwapBuffers(display, surface);
+        return EGL_TRUE;
+    }
+
+    // ── Mutex guard (re-entry safety) ─────────────────────────────
+    if (pthread_mutex_trylock(&g_render_mutex) != 0) {
+        if (orig_eglSwapBuffers)
+            return orig_eglSwapBuffers(display, surface);
+        return EGL_TRUE;
+    }
+
     g_frame_count++;
 
     // Get surface dimensions
@@ -484,6 +512,33 @@ EGLBoolean hook_eglSwapBuffers(EGLDisplay display, EGLSurface surface) {
     bool verbose = (g_frame_count <= 5) || (g_frame_count % 100 == 0);
     if (verbose) LOGI("[ENI] frame %d: NewFrame", g_frame_count);
 
+    // ── Save critical GL state (game may have left anything bound) ──
+    GLint gl_prog, gl_tex, gl_ab, gl_vab, gl_fbo, gl_vp[4], gl_scissor[4];
+    GLboolean gl_blend, gl_cull, gl_depth, gl_scissor_test, gl_stencil;
+    glGetIntegerv(GL_CURRENT_PROGRAM,          &gl_prog);
+    glGetIntegerv(GL_TEXTURE_BINDING_2D,       &gl_tex);
+    glGetIntegerv(GL_ARRAY_BUFFER_BINDING,     &gl_ab);
+    glGetIntegerv(GL_VERTEX_ARRAY_BINDING,     &gl_vab);
+    glGetIntegerv(GL_FRAMEBUFFER_BINDING,      &gl_fbo);
+    glGetIntegerv(GL_VIEWPORT,                 gl_vp);
+    glGetIntegerv(GL_SCISSOR_BOX,              gl_scissor);
+    gl_blend        = glIsEnabled(GL_BLEND);
+    gl_cull         = glIsEnabled(GL_CULL_FACE);
+    gl_depth        = glIsEnabled(GL_DEPTH_TEST);
+    gl_scissor_test = glIsEnabled(GL_SCISSOR_TEST);
+    gl_stencil      = glIsEnabled(GL_STENCIL_TEST);
+
+    // ── Set clean state for ImGui ────────────────────────────────
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glDisable(GL_DEPTH_TEST);
+    glDisable(GL_STENCIL_TEST);
+    glDisable(GL_CULL_FACE);
+    glDisable(GL_SCISSOR_TEST);
+    glEnable(GL_BLEND);
+    glBlendEquation(GL_FUNC_ADD);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    glViewport(0, 0, g_width, g_height);
+
     ImGui::GetIO().DisplaySize = { (float)g_width, (float)g_height };
 
     ImGui_ImplOpenGL3_NewFrame();
@@ -503,10 +558,25 @@ EGLBoolean hook_eglSwapBuffers(EGLDisplay display, EGLSurface surface) {
     ImGui::Render();
     ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
 
-    glViewport(0, 0, g_width, g_height);
+    // ── Restore game GL state ─────────────────────────────────────
+    glUseProgram(gl_prog);
+    glBindTexture(GL_TEXTURE_2D,               gl_tex);
+    glBindBuffer(GL_ARRAY_BUFFER,              gl_ab);
+    glBindVertexArray(gl_vab);
+    glBindFramebuffer(GL_FRAMEBUFFER,          gl_fbo);
+    glViewport(gl_vp[0], gl_vp[1], gl_vp[2],  gl_vp[3]);
+    glScissor(gl_scissor[0], gl_scissor[1], gl_scissor[2], gl_scissor[3]);
+    gl_blend        ? glEnable(GL_BLEND)        : glDisable(GL_BLEND);
+    gl_cull         ? glEnable(GL_CULL_FACE)    : glDisable(GL_CULL_FACE);
+    gl_depth        ? glEnable(GL_DEPTH_TEST)   : glDisable(GL_DEPTH_TEST);
+    gl_scissor_test ? glEnable(GL_SCISSOR_TEST) : glDisable(GL_SCISSOR_TEST);
+    gl_stencil      ? glEnable(GL_STENCIL_TEST) : glDisable(GL_STENCIL_TEST);
 
     if (verbose) LOGI("[ENI] frame %d: calling orig (ptr=%p)", g_frame_count, (void*)orig_eglSwapBuffers);
-    if (orig_eglSwapBuffers)
-        return orig_eglSwapBuffers(display, surface);
-    return EGL_TRUE;
+    EGLBoolean result = orig_eglSwapBuffers
+        ? orig_eglSwapBuffers(display, surface)
+        : EGL_TRUE;
+
+    pthread_mutex_unlock(&g_render_mutex);
+    return result;
 }
