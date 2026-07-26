@@ -146,6 +146,7 @@ void *hack_thread(void *arg) {
     LOGI("[ENI] il2cpp base: %p", (void*)g_il2cppBaseMap.startAddress);
     Pointers();
     Hooks();
+    InstallFeatureHooks();
 
     // ── eglSwapBuffers ────────────────────────────────────────────────────────
     void* eglSwapBuffers = nullptr;
