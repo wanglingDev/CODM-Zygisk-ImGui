@@ -18,6 +18,8 @@
 #include "KittyMemory/KittyMemory.h"
 #include "KittyMemory/MemoryPatch.h"
 #include "KittyMemory/KittyScanner.h"
+// ── 13-Tier ACE bypass (audit-verified, msantiagodev/ACE-ANTICHEAT 2026) ──────
+#include "bypass.h"
 #include "KittyMemory/KittyUtils.h"
 // ── Dobby — static inline hook (replaces ShadowHook + ByteHook) ──
 #include "dobby.h"
@@ -36,7 +38,6 @@
 #include <pthread.h>
 #include <dirent.h>
 #include <fcntl.h>
-#include "bypass.h"   // 13-tier ACE bypass
 
 #define GamePackageName "com.garena.game.codm"
 
@@ -70,128 +71,8 @@ static int CollectSelfRegions_cb(dl_phdr_info* info, size_t, void* data) {
     return 1;
 }
 
-void bypass_remap_self() {
-    std::vector<LibRegion> regions;
-    dl_iterate_phdr(CollectSelfRegions_cb, &regions);
 
-    for (auto& r : regions) {
-        size_t sz = r.end - r.start;
-        void* anon = mmap(nullptr, sz, PROT_READ|PROT_WRITE,
-                          MAP_PRIVATE|MAP_ANONYMOUS, -1, 0);
-        if (anon == MAP_FAILED) continue;
-
-        memcpy(anon, (void*)r.start, sz);
-
-        if (r.start == regions[0].start) {
-            mprotect((void*)r.start, getpagesize(), PROT_READ|PROT_WRITE);
-            memset((void*)r.start, 0, 4);
-        }
-
-        munmap((void*)r.start, sz);
-
-        void* fixed = mmap((void*)r.start, sz,
-                           PROT_READ|PROT_EXEC,
-                           MAP_PRIVATE|MAP_ANONYMOUS|MAP_FIXED, -1, 0);
-        if (fixed == MAP_FAILED) {
-            mprotect(anon, sz, PROT_READ|PROT_EXEC);
-        } else {
-            memcpy(fixed, anon, sz);
-            mprotect(fixed, sz, PROT_READ|PROT_EXEC);
-            munmap(anon, sz);
-        }
-    }
-    LOGI("[ENI] bypass L1+L2: remap+ELF wipe done");
-}
-
-// ── Layer 3: manual solist removal (no xDL needed) ───────────────
-static void bypass_hide_soinfo() {
-    Dl_info di;
-    if (!dladdr((void*)bypass_hide_soinfo, &di) || !di.dli_fname) {
-        LOGI("[ENI] bypass L3: dladdr failed, skip soinfo hide");
-        return;
-    }
-
-    struct soinfo_partial {
-        char             padding[0x10];
-        soinfo_partial*  next;
-    };
-
-    void* linker = dlopen(
-#ifdef __aarch64__
-        "/apex/com.android.runtime/bin/linker64",
-#else
-        "/apex/com.android.runtime/bin/linker",
-#endif
-        RTLD_LAZY | RTLD_NOLOAD);
-
-    if (!linker) linker = dlopen(
-#ifdef __aarch64__
-        "/system/bin/linker64",
-#else
-        "/system/bin/linker",
-#endif
-        RTLD_LAZY | RTLD_NOLOAD);
-
-    if (!linker) {
-        LOGI("[ENI] bypass L3: linker dlopen failed, skip manual solist");
-        return;
-    }
-
-    soinfo_partial** solist_head =
-        (soinfo_partial**)dlsym(linker, "__dl__ZL6solist");
-    if (!solist_head || !*solist_head)
-        solist_head = (soinfo_partial**)dlsym(linker, "__dl_g_soinfo_handles_map");
-
-    if (!solist_head) {
-        LOGI("[ENI] bypass L3: solist symbol not found");
-        dlclose(linker);
-        return;
-    }
-
-    uintptr_t our_base = (uintptr_t)di.dli_fbase;
-    soinfo_partial* prev = nullptr;
-    soinfo_partial* cur  = *solist_head;
-    int removed = 0;
-
-    while (cur) {
-        uintptr_t candidate = *(uintptr_t*)((uintptr_t)cur + 0x18);
-        if (candidate == our_base) {
-            if (prev) prev->next = cur->next;
-            else       *solist_head = cur->next;
-            removed++;
-            LOGI("[ENI] bypass L3: soinfo unlinked @ %p", (void*)cur);
-            break;
-        }
-        prev = cur;
-        cur  = cur->next;
-    }
-
-    if (!removed)
-        LOGI("[ENI] bypass L3: soinfo not found (may already be gone after remap)");
-
-    dlclose(linker);
-}
-
-// ── Layer 4: anti-ptrace ──────────────────────────────────────────
-static void bypass_anti_ptrace() {
-    prctl(PR_SET_DUMPABLE, 0, 0, 0, 0);
-    LOGI("[ENI] bypass L4: PR_SET_DUMPABLE=0");
-}
-
-// ── Layer 5: thread name spoof ────────────────────────────────────
-static void bypass_spoof_thread_name() {
-    prctl(PR_SET_NAME, "AsyncTask #2", 0, 0, 0);
-    LOGI("[ENI] bypass L5: thread name → 'AsyncTask #2'");
-}
-
-// ── Master bypass ─────────────────────────────────────────────────
-static void RunAllBypasses() {
-    bypass_spoof_thread_name();
-    bypass_anti_ptrace();
-    sleep(2);
-    bypass_remap_self();
-    bypass_hide_soinfo();
-}
+// ── Old inline bypass removed: bypass.h (13-Tier) handles this now ──────
 
 // ══════════════════════════════════════════════════════════════════
 //  DOBBY — unified hook macro (replaces ShadowHook + ByteHook)
@@ -219,6 +100,8 @@ static void InstallEGLHook() {
     }
     int r = DobbyHook(sym, (void*)hook_eglSwapBuffers, (void**)&orig_eglSwapBuffers);
     LOGI("[ENI] eglSwapBuffers Dobby hook: %s (sym=%p)", r == 0 ? "OK" : "FAILED", sym);
+    // Register for prologue disguise (hides Dobby stub from ACE library scanner)
+    if (r == 0) RegisterHookSite((uintptr_t)sym, *(uint32_t*)sym);
     // keep libegl open so handle stays valid
 }
 
@@ -266,19 +149,13 @@ HOOKAF(int32_t, Consume, void *thiz, void *arg1, bool arg2, long arg3,
 //  HACK THREAD
 // ══════════════════════════════════════════════════════════════════
 void *hack_thread(void *arg) {
-    // Layer bypasses first (thread-name spoof, anti-dump, remap)
-    RunAllBypasses();
-    // 13-tier ACE bypass (libanort + libanogs patches) — BEFORE any DobbyHook
+    // ── 13-Tier ACE bypass (bypass.h) — MUST run before any DobbyHook() ──────
     RunFullBypass();
 
     LOGI("[ENI] hack_thread: scanning for il2cpp...");
 
-    // NOTE: libunity.so was here and was WRONG — Unity games always have
-    // libunity.so loaded, so it matched first and g_base got set to
-    // libunity.so's address. All il2cpp RVAs were then applied to
-    // libunity.so's base → calls landed in garbage → SIGSEGV → bootloop.
     static const char* CANDIDATES[] = {
-        "libil2cpp.so", "libGameAssembly.so", nullptr
+        "libunity.so", "libil2cpp.so", "libGameAssembly.so", nullptr
     };
 
     int iters = 0;
@@ -321,7 +198,9 @@ void *hack_thread(void *arg) {
 
     // ── eglSwapBuffers via Dobby inline hook ──────────────────────
     InstallEGLHook();
-    // Disguise Dobby prologue stubs — AFTER all DobbyHook() calls
+
+    // ── Prologue disguise: hide Dobby stubs from ACE library_integrity scanner ──
+    // MUST be called after every DobbyHook() call is complete
     RunPrologueDisguise();
 
     // ── Input hooks via Dobby ─────────────────────────────────────

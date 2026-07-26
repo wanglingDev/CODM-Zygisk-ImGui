@@ -56,7 +56,6 @@
 #include <unistd.h>
 #include <cstdint>
 #include <cstdio>
-#include <cinttypes>  // SCNxPTR
 #include <cstdlib>
 #include <vector>
 #include <string>
