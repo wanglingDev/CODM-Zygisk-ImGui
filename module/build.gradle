@@ -25,9 +25,7 @@ android {
     externalNativeBuild {
         cmake {
             path "src/main/cpp/CMakeLists.txt"
-            // version "3.18.1" removed — AGP treats this as an EXACT match,
-            // which throws NullPointerException when that CMake is absent.
-            // AGP 7.4+ will auto-select the newest installed CMake (3.22+).
+            version "3.18.1"
         }
     }
     buildTypes{

@@ -65,14 +65,14 @@ void RenderESP(int screenW, int screenH) {
         auto headSc = WorldToScreen(Transform_GetPos(head));
         auto rootSc = WorldToScreen(Transform_GetPos(mesh));
 
-        if (headSc.Z <= 0 || rootSc.Z <= 0) continue;
+        if (headSc.z <= 0 || rootSc.z <= 0) continue;
 
         // Screen coords (Unity Y axis flip)
-        float hx = headSc.X, hy = screenH - headSc.Y;
-        float rx = rootSc.X, ry = screenH - rootSc.Y;
+        float hx = headSc.x, hy = screenH - headSc.y;
+        float rx = rootSc.x, ry = screenH - rootSc.y;
         float height = std::abs(ry - hy);
         float width  = height * 0.45f;
-        float dist   = headSc.Z;
+        float dist   = headSc.z;
 
         // Distance color fade
         ImVec4 espColor = {1.0f, 0.2f, 0.2f, 1.0f};
@@ -121,24 +121,10 @@ void RenderESP(int screenW, int screenH) {
 // IMGUI MENU
 // ================================================================
 void DrawMenu() {
-    // Menu selalu tampil otomatis saat in-game.
-    // Tap pojok kanan atas (area 60×60 px) untuk hide/show sementara.
     static bool showMenu = true;
-    {
-        static float _lastTapT = 0.f;
-        if (IsMouseClicked(0)) {
-            const ImVec2& mp  = GetIO().MousePos;
-            const float   sw  = GetIO().DisplaySize.x;
-            // pojok KANAN atas — jauh dari kontrol game yang biasanya di kiri
-            if (mp.x > sw - 60.f && mp.y < 60.f) {
-                float now = (float)GetTime();
-                if (now - _lastTapT > 0.3f) {   // debounce 300 ms
-                    showMenu   = !showMenu;
-                    _lastTapT  = now;
-                }
-            }
-        }
-    }
+
+    // Toggle menu dengan button invisible di pojok
+    if (IsKeyPressed(ImGuiKey_VolumeUp)) showMenu = !showMenu;
     if (!showMenu) return;
 
     SetNextWindowSize(ImVec2(320, 480), ImGuiCond_FirstUseEver);
@@ -202,7 +188,7 @@ void DrawMenu() {
         // ========================
         if (BeginTabItem("Misc")) {
             SeparatorText("Info");
-            Text("Base: 0x%" PRIxPTR, g_base);
+            Text("Base: 0x%lx", g_base);
             Text("Game: com.garena.game.codm");
             Text("Dump: 25 July 2026");
 
@@ -239,5 +225,41 @@ void SetupImgui() {
     io.Fonts->AddFontFromMemoryTTF(Roboto_Regular, 30, 14.0f * scale);
 }
 
+// ================================================================
+// EGL SWAP BUFFERS HOOK
+// ================================================================
+EGLBoolean (*old_eglSwapBuffers)(EGLDisplay dpy, EGLSurface surface);
+EGLBoolean hook_eglSwapBuffers(EGLDisplay dpy, EGLSurface surface) {
+    eglQuerySurface(dpy, surface, EGL_WIDTH,  &glWidth);
+    eglQuerySurface(dpy, surface, EGL_HEIGHT, &glHeight);
 
-// EGL + Vulkan hooks live in hook.cpp — not redefined here.
+    if (!setupimg) {
+        SetupImgui();
+        setupimg = true;
+    }
+
+    ImGuiIO& io = GetIO();
+    io.DisplaySize = ImVec2((float)glWidth, (float)glHeight);
+
+    ImGui_ImplOpenGL3_NewFrame();
+    NewFrame();
+
+    // Draw ESP (background layer)
+    RenderESP(glWidth, glHeight);
+
+    // Draw Menu (foreground)
+    DrawMenu();
+
+    // Aimbot
+    if (bAimbot && g_base) {
+        auto target = GetAimbotTarget(glWidth, glHeight);
+        if (target) DoAimbot(target);
+    }
+
+    EndFrame();
+    Render();
+    glViewport(0, 0, (int)io.DisplaySize.x, (int)io.DisplaySize.y);
+    ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
+
+    return old_eglSwapBuffers(dpy, surface);
+}
