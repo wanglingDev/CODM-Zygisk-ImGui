@@ -65,14 +65,14 @@ void RenderESP(int screenW, int screenH) {
         auto headSc = WorldToScreen(Transform_GetPos(head));
         auto rootSc = WorldToScreen(Transform_GetPos(mesh));
 
-        if (headSc.z <= 0 || rootSc.z <= 0) continue;
+        if (headSc.Z <= 0 || rootSc.Z <= 0) continue;
 
         // Screen coords (Unity Y axis flip)
-        float hx = headSc.x, hy = screenH - headSc.y;
-        float rx = rootSc.x, ry = screenH - rootSc.y;
+        float hx = headSc.X, hy = screenH - headSc.Y;
+        float rx = rootSc.X, ry = screenH - rootSc.Y;
         float height = std::abs(ry - hy);
         float width  = height * 0.45f;
-        float dist   = headSc.z;
+        float dist   = headSc.Z;
 
         // Distance color fade
         ImVec4 espColor = {1.0f, 0.2f, 0.2f, 1.0f};
@@ -124,7 +124,7 @@ void DrawMenu() {
     static bool showMenu = true;
 
     // Toggle menu dengan button invisible di pojok
-    if (IsKeyPressed(ImGuiKey_VolumeUp)) showMenu = !showMenu;
+    if (IsKeyPressed(ImGuiKey_Menu)) showMenu = !showMenu;
     if (!showMenu) return;
 
     SetNextWindowSize(ImVec2(320, 480), ImGuiCond_FirstUseEver);
