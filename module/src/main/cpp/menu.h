@@ -69,7 +69,7 @@ float hook_RecoilLatMod (void* p){ return bNoSpread ? 0.f : orig_RecoilLatMod(p)
 void InstallFeatureHooks() {
     // No-Recoil — RVA dari dump.cs (ganti kalau versi beda)
     #define _H(rva, fn, orig) \
-        DobbyHook((void*)(g_il2cppBaseMap.startAddress + (rva)), (void*)(fn), (void**)&(orig))
+        DobbyHook((void*)((uintptr_t)g_il2cppBaseMap.startAddress + (rva)), (void*)(fn), (void**)&(orig))
 
     _H(0x5C3A100, hook_RecoilUpBase,  orig_RecoilUpBase );
     _H(0x5C3A160, hook_RecoilLatBase, orig_RecoilLatBase);
@@ -306,7 +306,7 @@ static void DrawMenu() {
             ImGui::Spacing();
             SectionLabel("[ INFO ]");
             ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.5f,0.6f,0.7f,1.f));
-            ImGui::Text("Base: 0x%" PRIxPTR, g_il2cppBaseMap.startAddress);
+            ImGui::Text("Base: 0x%" PRIxPTR, (uintptr_t)g_il2cppBaseMap.startAddress);
             ImGui::Text("Screen: %.0fx%.0f", sw, sh);
             ImGui::PopStyleColor();
 

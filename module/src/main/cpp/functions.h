@@ -33,18 +33,6 @@
 // ================================================================
 // FEATURES TOGGLES
 // ================================================================
-bool bESP_Box      = false;
-bool bESP_Line     = false;
-bool bESP_Health   = false;
-bool bESP_Name     = false;
-bool bESP_Distance = false;
-bool bAimbot       = false;
-bool bAimFOV       = true;
-bool bAimHead      = true;
-bool bTrigger      = false;
-float fAimFOVSize  = 150.0f;
-float fAimSmooth   = 1.0f;
-int  iAimBone      = 0; // 0=head, 1=neck, 2=body
 
 // ================================================================
 // BASE ADDRESS
@@ -270,7 +258,7 @@ void DoAimbot(uintptr_t target) {
 // POINTERS & HOOKS
 // ================================================================
 void Pointers() {
-    g_base = g_il2cppBaseMap.startAddress;
+    g_base = (uintptr_t)g_il2cppBaseMap.startAddress;
     LOGI("CODM il2cpp base: 0x%" PRIxPTR, g_base);
 }
 
