@@ -269,8 +269,12 @@ void *hack_thread(void *arg) {
 
     LOGI("[ENI] hack_thread: scanning for il2cpp...");
 
+    // NOTE: libunity.so was here and was WRONG — Unity games always have
+    // libunity.so loaded, so it matched first and g_base got set to
+    // libunity.so's address. All il2cpp RVAs were then applied to
+    // libunity.so's base → calls landed in garbage → SIGSEGV → bootloop.
     static const char* CANDIDATES[] = {
-        "libunity.so", "libil2cpp.so", "libGameAssembly.so", nullptr
+        "libil2cpp.so", "libGameAssembly.so", nullptr
     };
 
     int iters = 0;
