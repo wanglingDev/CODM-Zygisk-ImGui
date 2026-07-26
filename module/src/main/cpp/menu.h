@@ -440,64 +440,69 @@ static void AimbotTick(float sw, float sh) {
 // ════════════════════════════════════════════════════════════════
 //  EGL SWAP HOOK IMPLEMENTATION
 // ════════════════════════════════════════════════════════════════
+static int g_frame_count = 0;
+
 EGLBoolean hook_eglSwapBuffers(EGLDisplay display, EGLSurface surface) {
+    g_frame_count++;
 
     // Get surface dimensions
     eglQuerySurface(display, surface, EGL_WIDTH,  &g_width);
     eglQuerySurface(display, surface, EGL_HEIGHT, &g_height);
 
     if (!g_imgui_init) {
+        LOGI("[ENI] frame %d: init start (display=%p surface=%p %dx%d)",
+             g_frame_count, display, surface, g_width, g_height);
+
         IMGUI_CHECKVERSION();
+        LOGI("[ENI] frame %d: CreateContext", g_frame_count);
         ImGui::CreateContext();
+
         ImGuiIO& io = ImGui::GetIO();
         io.DisplaySize = { (float)g_width, (float)g_height };
         io.IniFilename = nullptr;
 
-        // Load font — Roboto_Regular[] defined in Include/Roboto-Regular.h
-        // included by hook.cpp before menu.h, so symbol is visible here.
+        LOGI("[ENI] frame %d: loading font", g_frame_count);
         ImFontConfig fc;
         fc.FontDataOwnedByAtlas = false;
         float fontSize = (float)g_height * 0.022f;
         extern unsigned char Roboto_Regular[];
-        io.Fonts->AddFontFromMemoryTTF(
-            Roboto_Regular,
-            168260,
-            fontSize, &fc);
+        io.Fonts->AddFontFromMemoryTTF(Roboto_Regular, 168260, fontSize, &fc);
         io.Fonts->Build();
+        LOGI("[ENI] frame %d: font built", g_frame_count);
 
         ApplyCyberpunkTheme();
+        LOGI("[ENI] frame %d: ImGui_ImplAndroid_Init", g_frame_count);
         ImGui_ImplAndroid_Init(nullptr);
+        LOGI("[ENI] frame %d: ImGui_ImplOpenGL3_Init", g_frame_count);
         ImGui_ImplOpenGL3_Init("#version 100");
 
         g_imgui_init = true;
         LOGI("[ENI] ImGui initialized (%dx%d, font %.1fpx)", g_width, g_height, fontSize);
     }
 
-    // Update display size every frame (handles rotation)
+    // Only log every 100 frames to avoid spam
+    bool verbose = (g_frame_count <= 5) || (g_frame_count % 100 == 0);
+    if (verbose) LOGI("[ENI] frame %d: NewFrame", g_frame_count);
+
     ImGui::GetIO().DisplaySize = { (float)g_width, (float)g_height };
 
     ImGui_ImplOpenGL3_NewFrame();
     ImGui_ImplAndroid_NewFrame();
     ImGui::NewFrame();
 
-    float sw = (float)g_width, sh = (float)g_height;
-
-    // ESP + Aimbot dimatikan sementara — aktifkan setelah RVA diverifikasi via logcat
-    // ImDrawList* bgDL = ImGui::GetBackgroundDrawList();
-    // DrawESP(bgDL, sw, sh);
-    // AimbotTick(sw, sh);
-
-    // Mod menu
+    if (verbose) LOGI("[ENI] frame %d: DrawMenu", g_frame_count);
     DrawMenu();
 
+    if (verbose) LOGI("[ENI] frame %d: Render", g_frame_count);
     ImGui::Render();
     ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
 
-    // Restore GL state
     glViewport(0, 0, g_width, g_height);
 
-    // Call original via Dobby trampoline pointer
+    if (verbose) LOGI("[ENI] frame %d: calling orig (ptr=%p)", g_frame_count, (void*)orig_eglSwapBuffers);
     if (orig_eglSwapBuffers)
         return orig_eglSwapBuffers(display, surface);
     return EGL_TRUE;
 }
+
+
