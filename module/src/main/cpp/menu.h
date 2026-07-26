@@ -85,7 +85,8 @@ void InstallFeatureHooks() {
 // ════════════════════════════════════════════════════════════════
 //  EGL SWAP HOOK  (render loop)
 // ════════════════════════════════════════════════════════════════
-static EGLBoolean (*old_eglSwapBuffers)(EGLDisplay, EGLSurface) = nullptr;
+// orig_eglSwapBuffers is defined in hook.cpp (set by DobbyHook)
+extern EGLBoolean (*orig_eglSwapBuffers)(EGLDisplay, EGLSurface);
 static bool        g_imgui_init = false;
 static int         g_width = 0, g_height = 0;
 
@@ -440,9 +441,6 @@ static void AimbotTick(float sw, float sh) {
 //  EGL SWAP HOOK IMPLEMENTATION
 // ════════════════════════════════════════════════════════════════
 EGLBoolean hook_eglSwapBuffers(EGLDisplay display, EGLSurface surface) {
-    // Required for BYTEHOOK_CALL_PREV — sets up trampoline call stack.
-    // If ByteHook isn't the active hook engine, this is a no-op.
-    BYTEHOOK_STACK_SCOPE();
 
     // Get surface dimensions
     eglQuerySurface(display, surface, EGL_WIDTH,  &g_width);
@@ -498,7 +496,8 @@ EGLBoolean hook_eglSwapBuffers(EGLDisplay display, EGLSurface surface) {
     // Restore GL state
     glViewport(0, 0, g_width, g_height);
 
-    // Route to original via ByteHook's trampoline — no stored pointer needed.
-    // old_eglSwapBuffers stays as nullptr fallback (legacy, not called).
-    return BYTEHOOK_CALL_PREV(hook_eglSwapBuffers, display, surface);
+    // Call original via Dobby trampoline pointer
+    if (orig_eglSwapBuffers)
+        return orig_eglSwapBuffers(display, surface);
+    return EGL_TRUE;
 }

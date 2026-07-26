@@ -19,12 +19,8 @@
 #include "KittyMemory/MemoryPatch.h"
 #include "KittyMemory/KittyScanner.h"
 #include "KittyMemory/KittyUtils.h"
-// ── ShadowHook 2.0.1 — island-trampoline inline hook ──────────────
-#include "shadowhook.h"
-// ── ByteHook 1.1.1 — PLT/GOT hook (zero byte-patch at hook site) ──
-#include "bytehook.h"
-// ── xDL 2.4.0 — enhanced dlopen/dlsym + solist hiding ─────────────
-#include "xdl.h"
+// ── Dobby — static inline hook (replaces ShadowHook + ByteHook) ──
+#include "dobby.h"
 #include "Include/Unity.h"
 #include "Misc.h"
 #include "hook.h"
@@ -47,10 +43,9 @@
 //  BYPASS — 5 layers
 //  1. ELF header wipe        — kills magic-byte scan
 //  2. Anonymous remap        — hides from /proc/self/maps
-//  3. Solist removal (xDL)   — hides from linker soinfo chain
+//  3. Solist removal (manual) — hides from linker soinfo chain
 //  4. Anti-ptrace            — PR_SET_DUMPABLE=0
-//  5. Thread name spoof      — "AsyncTask #2" (more realistic than
-//                              FinalizerDaemon for a non-GC thread)
+//  5. Thread name spoof      — "AsyncTask #2"
 // ══════════════════════════════════════════════════════════════════
 
 // ── Layer 1 & 2: remap + ELF wipe ────────────────────────────────
@@ -86,7 +81,6 @@ void bypass_remap_self() {
 
         memcpy(anon, (void*)r.start, sz);
 
-        // Wipe ELF magic on first segment
         if (r.start == regions[0].start) {
             mprotect((void*)r.start, getpagesize(), PROT_READ|PROT_WRITE);
             memset((void*)r.start, 0, 4);
@@ -108,7 +102,7 @@ void bypass_remap_self() {
     LOGI("[ENI] bypass L1+L2: remap+ELF wipe done");
 }
 
-// ── Layer 3: xDL solist removal ───────────────────────────────────
+// ── Layer 3: manual solist removal (no xDL needed) ───────────────
 static void bypass_hide_soinfo() {
     Dl_info di;
     if (!dladdr((void*)bypass_hide_soinfo, &di) || !di.dli_fname) {
@@ -116,22 +110,6 @@ static void bypass_hide_soinfo() {
         return;
     }
 
-    // xDL enhanced open — bypasses Android 7+ namespace restrictions
-    void* xhandle = xdl_open(di.dli_fname, XDL_DEFAULT);
-    if (!xhandle) {
-        LOGI("[ENI] bypass L3: xdl_open failed (%s)", di.dli_fname);
-        return;
-    }
-
-    xdl_info_t xinfo;
-    if (xdl_info(xhandle, XDL_DI_DLINFO, &xinfo) == 0) {
-        LOGI("[ENI] bypass L3: xdl confirmed lib @ %p (%s)",
-             xinfo.dli_fbase, xinfo.dli_fname ? xinfo.dli_fname : "anonymous");
-    }
-    xdl_close(xhandle);
-
-    // Manual solist walk — unlink our soinfo from the linker chain.
-    // Works Android 5–16; solist head is at __dl__ZL6solist in linker.
     struct soinfo_partial {
         char             padding[0x10];
         soinfo_partial*  next;
@@ -164,7 +142,7 @@ static void bypass_hide_soinfo() {
         solist_head = (soinfo_partial**)dlsym(linker, "__dl_g_soinfo_handles_map");
 
     if (!solist_head) {
-        LOGI("[ENI] bypass L3: solist symbol not found, relying on remap+xdl");
+        LOGI("[ENI] bypass L3: solist symbol not found");
         dlclose(linker);
         return;
     }
@@ -201,103 +179,46 @@ static void bypass_anti_ptrace() {
 
 // ── Layer 5: thread name spoof ────────────────────────────────────
 static void bypass_spoof_thread_name() {
-    // "AsyncTask #2" — plausible non-GC worker thread name.
-    // "FinalizerDaemon" would flag itself because ACE knows that name
-    // belongs to the JVM GC thread and can cross-check thread binding.
     prctl(PR_SET_NAME, "AsyncTask #2", 0, 0, 0);
     LOGI("[ENI] bypass L5: thread name → 'AsyncTask #2'");
 }
 
 // ── Master bypass ─────────────────────────────────────────────────
 static void RunAllBypasses() {
-    bypass_spoof_thread_name();   // L5 first — name set before any scan window
-    bypass_anti_ptrace();          // L4
-    sleep(2);                      // wait for il2cpp to settle before remap
-    bypass_remap_self();           // L1+L2
-    bypass_hide_soinfo();          // L3 — after remap so our base is confirmed
+    bypass_spoof_thread_name();
+    bypass_anti_ptrace();
+    sleep(2);
+    bypass_remap_self();
+    bypass_hide_soinfo();
 }
 
 // ══════════════════════════════════════════════════════════════════
-//  SHADOWHOOK 2.0.1 — island-trampoline inline hook
-//  Used for: hooks where we need the original function pointer
-//  (input handlers, game function hooks)
-//  NOT used for eglSwapBuffers — ByteHook PLT is stealthier there.
+//  DOBBY — unified hook macro (replaces ShadowHook + ByteHook)
 // ══════════════════════════════════════════════════════════════════
-static bool g_shadowhook_inited = false;
+#define DoHook(addr, fn, orig) \
+    DobbyHook((void*)(addr), (void*)(fn), (void**)(orig))
 
-static void InitShadowHook() {
-    if (g_shadowhook_inited) return;
-    int r = shadowhook_init(SHADOWHOOK_MODE_UNIQUE, false);
-    LOGI("[ENI] shadowhook_init: %d (%s)", r, r == 0 ? "OK" : shadowhook_to_errmsg(r));
-    g_shadowhook_inited = (r == 0);
-}
-
-// Macro: same call-site as DobbyHook was, now routes to ShadowHook
-#define SHHook(addr, fn, orig) \
-    shadowhook_hook_func_addr((void*)(addr), (void*)(fn), (void**)(orig))
-
-// ══════════════════════════════════════════════════════════════════
-//  BYTEHOOK 1.1.1 — PLT/GOT hook for eglSwapBuffers
-//
-//  Why PLT over ShadowHook inline here:
-//  ShadowHook writes an island trampoline but still patches the first
-//  instruction of the target function — ACE's library_integrity_scanner
-//  (libanort T1[6]) specifically walks .text looking for modified
-//  prologues. ByteHook instead overwrites the GOT *pointer* inside
-//  libunity.so's .got.plt — no instruction bytes are touched.
-//  ACE doesn't scan GOT entries, so this is a structural blind spot.
-//
-//  Strategy:
-//    bytehook_hook_single("libunity.so", "libEGL.so", "eglSwapBuffers", ...)
-//    — hooks the GOT entry in libunity.so that resolves to libEGL's
-//      eglSwapBuffers. Calls from libunity → our hook → original.
-//    We also hook it in libGameAssembly.so for full coverage.
-// ══════════════════════════════════════════════════════════════════
-static bool           g_bytehook_inited  = false;
-static bytehook_stub_t g_egl_stub_unity  = nullptr;
-static bytehook_stub_t g_egl_stub_game   = nullptr;
-
-// hook_eglSwapBuffers and old_eglSwapBuffers are defined in menu.h (included below).
-// Forward-declare only so InstallEGLPLTHook can reference them before the include.
+// Forward-declare for EGL hook
 extern EGLBoolean hook_eglSwapBuffers(EGLDisplay dpy, EGLSurface surface);
+static EGLBoolean (*orig_eglSwapBuffers)(EGLDisplay, EGLSurface) = nullptr;
 
-static void InitByteHook() {
-    if (g_bytehook_inited) return;
-    int r = bytehook_init(BYTEHOOK_MODE_AUTOMATIC, false);
-    LOGI("[ENI] bytehook_init: %d (%s)", r, r == 0 ? "OK" : "FAILED");
-    g_bytehook_inited = (r == 0);
-}
-
-// PLT hook installer — called after il2cpp is confirmed loaded
-static void InstallEGLPLTHook() {
-    if (!g_bytehook_inited) {
-        LOGE("[ENI] bytehook not initialised — EGL PLT hook skipped");
+static void InstallEGLHook() {
+    // dlopen libEGL.so, dlsym eglSwapBuffers, Dobby inline hook
+    void* libegl = dlopen("libEGL.so", RTLD_LAZY | RTLD_NOLOAD);
+    if (!libegl) libegl = dlopen("libEGL.so", RTLD_LAZY);
+    if (!libegl) {
+        LOGE("[ENI] libEGL.so dlopen failed");
         return;
     }
-
-    // Hook eglSwapBuffers in libunity.so's GOT (primary call site)
-    g_egl_stub_unity = bytehook_hook_single(
-        "libunity.so",           // caller lib — where the GOT entry lives
-        "libEGL.so",             // callee lib — where the symbol resolves from
-        "eglSwapBuffers",        // symbol name
-        (void*)hook_eglSwapBuffers,
-        nullptr,                 // hooked callback (not needed)
-        nullptr                  // hooked callback arg
-    );
-    LOGI("[ENI] eglSwapBuffers PLT hook (unity.so): %s",
-         g_egl_stub_unity ? "OK" : "FAILED");
-
-    // Also hook in libGameAssembly.so — some CODM builds call EGL directly
-    g_egl_stub_game = bytehook_hook_single(
-        "libGameAssembly.so",
-        "libEGL.so",
-        "eglSwapBuffers",
-        (void*)hook_eglSwapBuffers,
-        nullptr,
-        nullptr
-    );
-    LOGI("[ENI] eglSwapBuffers PLT hook (GameAssembly.so): %s",
-         g_egl_stub_game ? "OK" : "FAILED (non-fatal if lib absent)");
+    void* sym = dlsym(libegl, "eglSwapBuffers");
+    if (!sym) {
+        LOGE("[ENI] eglSwapBuffers sym not found");
+        dlclose(libegl);
+        return;
+    }
+    int r = DobbyHook(sym, (void*)hook_eglSwapBuffers, (void**)&orig_eglSwapBuffers);
+    LOGI("[ENI] eglSwapBuffers Dobby hook: %s (sym=%p)", r == 0 ? "OK" : "FAILED", sym);
+    // keep libegl open so handle stays valid
 }
 
 // ══════════════════════════════════════════════════════════════════
@@ -323,7 +244,7 @@ int isGame(JNIEnv *env, jstring appDataDir) {
     return 0;
 }
 
-// ── Input hooks (ShadowHook island-trampoline) ────────────────────
+// ── Input hooks (Dobby inline) ────────────────────────────────────
 HOOKAF(void, Input, void *thiz, void *ex_ab, void *ex_ac) {
     origInput(thiz, ex_ab, ex_ac);
     ImGui_ImplAndroid_HandleInputEvent((AInputEvent*)thiz);
@@ -344,12 +265,7 @@ HOOKAF(int32_t, Consume, void *thiz, void *arg1, bool arg2, long arg3,
 //  HACK THREAD
 // ══════════════════════════════════════════════════════════════════
 void *hack_thread(void *arg) {
-    // ── Surface + solist bypass ───────────────────────────────────
     RunAllBypasses();
-
-    // ── Init hook engines ─────────────────────────────────────────
-    InitShadowHook();   // island-trampoline for game hooks
-    InitByteHook();     // PLT/GOT hook for EGL
 
     LOGI("[ENI] hack_thread: scanning for il2cpp...");
 
@@ -395,39 +311,34 @@ void *hack_thread(void *arg) {
     Hooks();
     InstallFeatureHooks();
 
-    // ── eglSwapBuffers — PLT hook via ByteHook ────────────────────
-    // No dlsym or address needed: ByteHook resolves the GOT entry
-    // inside the caller lib automatically. Zero instruction bytes
-    // are modified — ACE's .text scanner sees nothing.
-    InstallEGLPLTHook();
+    // ── eglSwapBuffers via Dobby inline hook ──────────────────────
+    InstallEGLHook();
 
-    // ── Input hooks via ShadowHook (island trampoline) ────────────
+    // ── Input hooks via Dobby ─────────────────────────────────────
 #ifdef __aarch64__
     #define LIBINPUT "/system/lib64/libinput.so"
 #else
     #define LIBINPUT "/system/lib/libinput.so"
 #endif
 
-    void* libinput = xdl_open(LIBINPUT, XDL_DEFAULT);
+    void* libinput = dlopen(LIBINPUT, RTLD_LAZY);
     if (libinput) {
-        void* sym = xdl_sym(libinput,
-            "_ZN7android13InputConsumer21initializeMotionEventEPNS_11MotionEventEPKNS_12InputMessageE",
-            nullptr);
+        void* sym = dlsym(libinput,
+            "_ZN7android13InputConsumer21initializeMotionEventEPNS_11MotionEventEPKNS_12InputMessageE");
         if (sym) {
-            void* s = SHHook(sym, myInput, &origInput);
-            LOGI("[ENI] initializeMotionEvent: %s", s?"OK":"FAILED");
+            int r = DoHook(sym, myInput, &origInput);
+            LOGI("[ENI] initializeMotionEvent: %s", r==0?"OK":"FAILED");
         }
 
-        sym = xdl_sym(libinput,
-            "_ZN7android13InputConsumer7consumeEPNS_26InputEventFactoryInterfaceEblPjPPNS_10InputEventE",
-            nullptr);
+        sym = dlsym(libinput,
+            "_ZN7android13InputConsumer7consumeEPNS_26InputEventFactoryInterfaceEblPjPPNS_10InputEventE");
         if (sym) {
-            void* s = SHHook(sym, myConsume, &origConsume);
-            LOGI("[ENI] consume hook: %s", s?"OK":"FAILED");
+            int r = DoHook(sym, myConsume, &origConsume);
+            LOGI("[ENI] consume hook: %s", r==0?"OK":"FAILED");
         }
-        xdl_close(libinput);
+        // keep open — Dobby trampoline references the original code
     } else {
-        LOGI("[ENI] libinput xdl_open failed (non-fatal)");
+        LOGI("[ENI] libinput dlopen failed (non-fatal)");
     }
 
     LOGI("[ENI] hack_thread: setup complete!");

@@ -27,17 +27,14 @@ set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${C_FLAGS} ${CXX_FLAGS}")
 set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} ${LINKER_FLAGS}")
 set(CMAKE_MODULE_LINKER_FLAGS "${CMAKE_MODULE_LINKER_FLAGS} ${LINKER_FLAGS}")
 
-# ── Prefab packages (via Gradle dependencies) ─────────────────────────────────
-# xDL 2.4.0  — enhanced dlopen/dlsym + solist manipulation
-find_package(xdl REQUIRED CONFIG)
-# ShadowHook 2.0.1 — island-trampoline inline hook, replaces Dobby
-find_package(shadowhook REQUIRED CONFIG)
-# ByteHook 1.1.1 — PLT/GOT hook (zero byte-patch at hook site)
-find_package(bytehook REQUIRED CONFIG)
+# ── Prebuilt static libs ──────────────────────────────────────────
+set(DOBBY_LIB ${CMAKE_CURRENT_SOURCE_DIR}/libs/${CMAKE_ANDROID_ARCH_ABI}/libdobby.a)
+set(CURL_LIB  ${CMAKE_CURRENT_SOURCE_DIR}/libs/${CMAKE_ANDROID_ARCH_ABI}/libcurl.a)
 
 include_directories(KittyMemory)
 include_directories(Include)
 include_directories(Includes)
+include_directories(Includes/Dobby)
 include_directories(ImGui)
 include_directories(ImGui/backends)
 
@@ -60,9 +57,6 @@ add_library(${MODULE_NAME}
         hook.cpp
         )
 
-# libcurl stays (auth/network)
-set(CURL_LIB ${CMAKE_CURRENT_SOURCE_DIR}/libs/${CMAKE_ANDROID_ARCH_ABI}/libcurl.a)
-
 find_library(log-lib log)
 find_library(egl EGL)
 find_library(android android)
@@ -70,25 +64,20 @@ find_library(GLESV2_LIB GLESv2)
 find_library(LZ_LIB z)
 
 if (${ANDROID_PLATFORM_LEVEL} LESS 12)
-    message(FATAL_ERROR "OpenGL 2 is not supported before API level 11 /
-                      (currently using ${ANDROID_PLATFORM_LEVEL}).")
+    message(FATAL_ERROR "OpenGL 2 is not supported before API level 11")
     return()
 elseif (${ANDROID_PLATFORM_LEVEL} LESS 18)
     add_definitions("-DDYNAMIC_ES3")
-    set(GL3STUB_SRC gl3stub.c)
     set(OPENGL_LIB GLESv2)
 else ()
     set(OPENGL_LIB GLESv3)
-endif (${ANDROID_PLATFORM_LEVEL} LESS 12)
+endif ()
 
 target_link_libraries(
         ${MODULE_NAME}
         log
-        # ── Prefab libs — STATIC so no runtime .so deps ────────────
-        xdl::xdl_static
-        shadowhook::shadowhook_static
-        bytehook::bytehook_static
-        # ── Static libs ────────────────────────────────────────────
+        # ── Prebuilt static ────────────────────────────────────────
+        ${DOBBY_LIB}
         ${CURL_LIB}
         # ── System libs ────────────────────────────────────────────
         ${OPENGL_LIB}

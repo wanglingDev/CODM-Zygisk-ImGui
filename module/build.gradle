@@ -25,7 +25,7 @@ android {
         }
     }
     buildFeatures {
-        prefab true
+        prefab false
     }
     externalNativeBuild {
         cmake {
@@ -38,12 +38,7 @@ android {
             minifyEnabled true
         }
     }
-    packagingOptions {
-        // deps are statically linked — exclude shared .so from APK/module zip
-        exclude '**/libxdl.so'
-        exclude '**/libshadowhook.so'
-        exclude '**/libbytehook.so'
-    }
+    // All deps statically linked via libdobby.a — no .so packaging needed
 }
 
 repositories {
@@ -52,14 +47,7 @@ repositories {
 }
 
 dependencies {
-    // ── xDL 2.4.0 — enhanced dlopen/dlsym + solist hiding ──────────
-    implementation 'io.github.hexhacking:xdl:2.4.0'
-
-    // ── ShadowHook 2.0.1 — island-trampoline inline hook (replaces Dobby) ──
-    implementation 'com.bytedance.android:shadowhook:2.0.1'
-
-    // ── ByteHook 1.1.1 — PLT/GOT hook for eglSwapBuffers (stealthier) ─
-    implementation 'com.bytedance:bytehook:1.1.1'
+    // All native deps (Dobby, curl) are prebuilt .a in libs/ — no AAR needed
 }
 
 afterEvaluate {
