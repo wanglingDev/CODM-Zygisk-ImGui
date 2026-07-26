@@ -440,6 +440,10 @@ static void AimbotTick(float sw, float sh) {
 //  EGL SWAP HOOK IMPLEMENTATION
 // ════════════════════════════════════════════════════════════════
 EGLBoolean hook_eglSwapBuffers(EGLDisplay display, EGLSurface surface) {
+    // Required for BYTEHOOK_CALL_PREV — sets up trampoline call stack.
+    // If ByteHook isn't the active hook engine, this is a no-op.
+    BYTEHOOK_STACK_SCOPE();
+
     // Get surface dimensions
     eglQuerySurface(display, surface, EGL_WIDTH,  &g_width);
     eglQuerySurface(display, surface, EGL_HEIGHT, &g_height);
@@ -494,5 +498,7 @@ EGLBoolean hook_eglSwapBuffers(EGLDisplay display, EGLSurface surface) {
     // Restore GL state
     glViewport(0, 0, g_width, g_height);
 
-    return old_eglSwapBuffers(display, surface);
+    // Route to original via ByteHook's trampoline — no stored pointer needed.
+    // old_eglSwapBuffers stays as nullptr fallback (legacy, not called).
+    return BYTEHOOK_CALL_PREV(hook_eglSwapBuffers, display, surface);
 }

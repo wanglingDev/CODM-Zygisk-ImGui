@@ -257,14 +257,14 @@ static bool           g_bytehook_inited  = false;
 static bytehook_stub_t g_egl_stub_unity  = nullptr;
 static bytehook_stub_t g_egl_stub_game   = nullptr;
 
-// Forward-declare the hook function — defined below with eglSwapBuffers type
-static EGLBoolean hook_eglSwapBuffers(EGLDisplay dpy, EGLSurface surface);
-static EGLBoolean (*old_eglSwapBuffers)(EGLDisplay, EGLSurface) = nullptr;
+// hook_eglSwapBuffers and old_eglSwapBuffers are defined in menu.h (included below).
+// Forward-declare only so InstallEGLPLTHook can reference them before the include.
+extern EGLBoolean hook_eglSwapBuffers(EGLDisplay dpy, EGLSurface surface);
 
 static void InitByteHook() {
     if (g_bytehook_inited) return;
     int r = bytehook_init(BYTEHOOK_MODE_AUTOMATIC, false);
-    LOGI("[ENI] bytehook_init: %d (%s)", r, r == 0 ? "OK" : bytehook_get_error_name(r));
+    LOGI("[ENI] bytehook_init: %d (%s)", r, r == 0 ? "OK" : "FAILED");
     g_bytehook_inited = (r == 0);
 }
 
@@ -298,20 +298,6 @@ static void InstallEGLPLTHook() {
     );
     LOGI("[ENI] eglSwapBuffers PLT hook (GameAssembly.so): %s",
          g_egl_stub_game ? "OK" : "FAILED (non-fatal if lib absent)");
-}
-
-// ── eglSwapBuffers hook implementation ───────────────────────────
-// BYTEHOOK_STACK_SCOPE() sets up the callstack for BYTEHOOK_CALL_PREV
-// so we can safely call the original without a stored pointer.
-static EGLBoolean hook_eglSwapBuffers(EGLDisplay dpy, EGLSurface surface) {
-    BYTEHOOK_STACK_SCOPE();
-
-    // ── ImGui render ─────────────────────────────────────────────
-    ImGui::Render();
-    ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
-
-    // ── Call original via ByteHook's trampoline ───────────────────
-    return BYTEHOOK_CALL_PREV(hook_eglSwapBuffers, dpy, surface);
 }
 
 // ══════════════════════════════════════════════════════════════════
