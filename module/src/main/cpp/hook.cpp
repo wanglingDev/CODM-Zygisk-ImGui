@@ -93,19 +93,30 @@ void *hack_thread(void *arg) {
     Pointers();
     Hooks();
 
-    // BUG 1 FIX: hook eglSwapBuffers via libunity.so, not libEGL.so.
-    // Unity games resolve their EGL function pointer at startup inside
-    // libunity.so. Hooking libEGL.so directly sometimes misses the CODM
-    // render thread because it already cached the function pointer before
-    // our module loaded. Hooking at the libunity.so call site catches it.
-    auto eglhandle = dlopen("libunity.so", RTLD_LAZY);
-    auto eglSwapBuffers = eglhandle ? dlsym(eglhandle, "eglSwapBuffers") : nullptr;
+    // Hook eglSwapBuffers: coba libEGL.so dulu (paling reliable),
+    // fallback ke libunity.so kalau gagal.
+    void* eglSwapBuffers = nullptr;
+
+    auto eglhandle = dlopen("libEGL.so", RTLD_LAZY);
+    if (eglhandle) {
+        eglSwapBuffers = dlsym(eglhandle, "eglSwapBuffers");
+        if (eglSwapBuffers) LOGI("eglSwapBuffers found in libEGL.so");
+    }
+
+    if (!eglSwapBuffers) {
+        auto unityhandle = dlopen("libunity.so", RTLD_LAZY);
+        if (unityhandle) {
+            eglSwapBuffers = dlsym(unityhandle, "eglSwapBuffers");
+            if (eglSwapBuffers) LOGI("eglSwapBuffers found in libunity.so (fallback)");
+        }
+    }
+
     if (eglSwapBuffers) {
-        DobbyHook((void*)eglSwapBuffers,(void*)hook_eglSwapBuffers,
+        DobbyHook((void*)eglSwapBuffers, (void*)hook_eglSwapBuffers,
                   (void**)&old_eglSwapBuffers);
-        LOGI("eglSwapBuffers hooked via libunity.so");
+        LOGI("eglSwapBuffers hooked!");
     } else {
-        LOGI("eglSwapBuffers not found — CODM likely Vulkan-only on this device, Vulkan path active");
+        LOGI("eglSwapBuffers not found anywhere — device may use Vulkan");
     }
 
     // BUG 2 FIX: /system/lib/ is 32-bit only. arm64 system libs live in
