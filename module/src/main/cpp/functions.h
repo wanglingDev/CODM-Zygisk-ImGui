@@ -211,16 +211,16 @@ uintptr_t GetAimbotTarget(int screenW, int screenH) {
         auto head = GetPawnHeadBone(p);
         if (!head) continue;
         auto sc = WorldToScreen(Transform_GetPos(head));
-        if (sc.z <= 0) continue;
-        if (!IsInsideFOV(sc.x, sc.y, screenW, screenH)) continue;
-        float d = sqrtf((sc.x-cx)*(sc.x-cx)+(sc.y-cy)*(sc.y-cy));
+        if (sc.Z <= 0) continue;
+        if (!IsInsideFOV(sc.X, sc.Y, screenW, screenH)) continue;
+        float d = sqrtf((sc.X-cx)*(sc.X-cx)+(sc.Y-cy)*(sc.Y-cy));
         if (d < minDist) { result = p; minDist = d; }
     }
     return result;
 }
 
 Quaternion LookAt(Vector3 from, Vector3 to) {
-    float dx = to.x-from.x, dy = to.y-from.y, dz = to.z-from.z;
+    float dx = to.X-from.X, dy = to.Y-from.Y, dz = to.Z-from.Z;
     float yaw   = atan2f(dx, dz);
     float pitch = -atan2f(dy, sqrtf(dx*dx+dz*dz));
     float cy = cosf(yaw*0.5f), sy = sinf(yaw*0.5f);
@@ -229,18 +229,18 @@ Quaternion LookAt(Vector3 from, Vector3 to) {
 }
 
 Quaternion QuatSlerp(Quaternion a, Quaternion b, float t) {
-    float dot = a.x*b.x + a.y*b.y + a.z*b.z + a.w*b.w;
-    if (dot < 0) { b.x=-b.x; b.y=-b.y; b.z=-b.z; b.w=-b.w; dot=-dot; }
+    float dot = a.X*b.X + a.Y*b.Y + a.Z*b.Z + a.W*b.W;
+    if (dot < 0) { b.X=-b.X; b.Y=-b.Y; b.Z=-b.Z; b.W=-b.W; dot=-dot; }
     if (dot > 0.9995f) {
-        return { a.x + t*(b.x-a.x), a.y + t*(b.y-a.y),
-                 a.z + t*(b.z-a.z), a.w + t*(b.w-a.w) };
+        return { a.X + t*(b.X-a.X), a.Y + t*(b.Y-a.Y),
+                 a.Z + t*(b.Z-a.Z), a.W + t*(b.W-a.W) };
     }
     float theta0 = acosf(dot);
     float theta  = theta0 * t;
     float s0 = cosf(theta) - dot * sinf(theta) / sinf(theta0);
     float s1 = sinf(theta) / sinf(theta0);
-    return { s0*a.x + s1*b.x, s0*a.y + s1*b.y,
-             s0*a.z + s1*b.z, s0*a.w + s1*b.w };
+    return { s0*a.X + s1*b.X, s0*a.Y + s1*b.Y,
+             s0*a.Z + s1*b.Z, s0*a.W + s1*b.W };
 }
 
 void DoAimbot(uintptr_t target) {
