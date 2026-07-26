@@ -188,7 +188,7 @@ void DrawMenu() {
         // ========================
         if (BeginTabItem("Misc")) {
             SeparatorText("Info");
-            Text("Base: 0x%lx", g_base);
+            Text("Base: 0x%" PRIxPTR, g_base);
             Text("Game: com.garena.game.codm");
             Text("Dump: 25 July 2026");
 

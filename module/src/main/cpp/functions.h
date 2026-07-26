@@ -5,7 +5,8 @@
 // Method: Direct RVA (libil2cpp.so base)
 // ================================================================
 
-#include <cfloat>  // FLT_MAX
+#include <cfloat>
+#include <inttypes.h>  // FLT_MAX
 
 // ================================================================
 // DIRECT RVA FROM DUMP.CS (25/07/2026)
@@ -270,7 +271,7 @@ void DoAimbot(uintptr_t target) {
 // ================================================================
 void Pointers() {
     g_base = g_il2cppBaseMap.startAddress;
-    LOGI("CODM il2cpp base: 0x%lx", g_base);
+    LOGI("CODM il2cpp base: 0x%" PRIxPTR, g_base);
 }
 
 void Hooks() {
