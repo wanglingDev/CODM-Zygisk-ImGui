@@ -1,0 +1,34 @@
+name: Build CODM Garena Zygisk Module
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main ]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        submodules: recursive
+
+    - uses: actions/setup-java@v4
+      with:
+        distribution: temurin
+        java-version: 17
+        cache: gradle
+
+    - name: Setup Android SDK
+      uses: android-actions/setup-android@v3
+
+    - name: Build Release
+      run: |
+        chmod +x ./gradlew
+        ./gradlew :module:zipRelease
+
+    - name: Upload Zygisk Module
+      uses: actions/upload-artifact@v4
+      with:
+        name: CODM-Garena-Zygisk-Module
+        path: out/*.zip

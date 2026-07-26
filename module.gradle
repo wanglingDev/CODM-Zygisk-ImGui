@@ -1,0 +1,9 @@
+ext {
+    moduleLibraryName  = "CODMGarena"
+    magiskModuleId     = "codm-garena-mod"
+    moduleName         = "CODM Garena Mod Menu"
+    moduleAuthor       = "wanglingDev x ENI"
+    moduleDescription  = "ESP + Aimbot | Dump: 25/07/2026 | com.garena.game.codm"
+    moduleVersion      = "v1.0"
+    moduleVersionCode  = 1
+}
