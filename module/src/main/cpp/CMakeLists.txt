@@ -1,4 +1,6 @@
-cmake_minimum_required(VERSION 3.18.1)
+# 3.10.2 is the true minimum for Android NDK externalNativeBuild.
+# The build environment ships CMake 3.22+ / 4.x; any of those satisfies this.
+cmake_minimum_required(VERSION 3.10.2)
 
 if (NOT DEFINED MODULE_NAME)
     message(FATAL_ERROR "MODULE_NAME is not set")

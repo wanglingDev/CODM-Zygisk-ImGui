@@ -22,6 +22,14 @@ jobs:
     - name: Setup Android SDK
       uses: android-actions/setup-android@v3
 
+    # Install a specific NDK + CMake so the build is reproducible and never
+    # hits the "CMake 3.18.1 not found" NullPointerException.
+    - name: Install NDK and CMake
+      run: |
+        $ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager \
+          "ndk;25.2.9519653" \
+          "cmake;3.22.1"
+
     - name: Build Release
       run: |
         chmod +x ./gradlew
