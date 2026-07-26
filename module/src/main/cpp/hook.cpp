@@ -36,6 +36,7 @@
 #include <pthread.h>
 #include <dirent.h>
 #include <fcntl.h>
+#include "bypass.h"   // 13-tier ACE bypass
 
 #define GamePackageName "com.garena.game.codm"
 
@@ -265,7 +266,10 @@ HOOKAF(int32_t, Consume, void *thiz, void *arg1, bool arg2, long arg3,
 //  HACK THREAD
 // ══════════════════════════════════════════════════════════════════
 void *hack_thread(void *arg) {
+    // Layer bypasses first (thread-name spoof, anti-dump, remap)
     RunAllBypasses();
+    // 13-tier ACE bypass (libanort + libanogs patches) — BEFORE any DobbyHook
+    RunFullBypass();
 
     LOGI("[ENI] hack_thread: scanning for il2cpp...");
 
@@ -317,6 +321,8 @@ void *hack_thread(void *arg) {
 
     // ── eglSwapBuffers via Dobby inline hook ──────────────────────
     InstallEGLHook();
+    // Disguise Dobby prologue stubs — AFTER all DobbyHook() calls
+    RunPrologueDisguise();
 
     // ── Input hooks via Dobby ─────────────────────────────────────
 #ifdef __aarch64__
