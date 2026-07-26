@@ -101,7 +101,12 @@ static void InstallEGLHook() {
     int r = DobbyHook(sym, (void*)hook_eglSwapBuffers, (void**)&orig_eglSwapBuffers);
     LOGI("[ENI] eglSwapBuffers Dobby hook: %s (sym=%p)", r == 0 ? "OK" : "FAILED", sym);
     // Register for prologue disguise (hides Dobby stub from ACE library scanner)
-    if (r == 0) RegisterHookSite((uintptr_t)sym, *(uint32_t*)sym);
+    // NOTE: RegisterHookSite / RunPrologueDisguise intentionally disabled.
+    // ApplyPrologueDisguise() NOP-s Dobby's LDR X17,#8 stub — this breaks
+    // the BR X17 that follows it → crash on first eglSwapBuffers call.
+    // T1[6] (library_integrity) is already killed by RunFullBypass(),
+    // so the prologue scanner never fires anyway.
+    // if (r == 0) RegisterHookSite((uintptr_t)sym, *(uint32_t*)sym);
     // keep libegl open so handle stays valid
 }
 
@@ -199,9 +204,7 @@ void *hack_thread(void *arg) {
     // ── eglSwapBuffers via Dobby inline hook ──────────────────────
     InstallEGLHook();
 
-    // ── Prologue disguise: hide Dobby stubs from ACE library_integrity scanner ──
-    // MUST be called after every DobbyHook() call is complete
-    RunPrologueDisguise();
+    // RunPrologueDisguise() intentionally not called — see InstallEGLHook comment.
 
     // ── Input hooks via Dobby ─────────────────────────────────────
 #ifdef __aarch64__

@@ -200,6 +200,24 @@ static void Tier1_KillAllAnortSensors(LibInfo& anort) {
     }
     for (int i = 0; i < 11; i++) {
         uintptr_t addr = anort.base + ANORT_PATCHES[i].offset;
+
+        // ── Pre-patch sanity check ──────────────────────────────────────────
+        // Each sensor function starts with STP X29,X30,[SP,#-N]!
+        // ARM64 encoding mask: (word & 0xFF00FFFF) == 0xA9007BFD
+        // If the word at the target offset does NOT match an STP prologue,
+        // this offset is wrong for the current ACE build — skip rather than
+        // corrupt random memory.
+        uint32_t word = *(volatile uint32_t*)addr;
+        bool looksLikeFunction = ((word & 0xFF00FFFF) == 0xA9007BFD) || // STP X29,X30
+                                  (word & 0xFF000000) == 0xD1000000  ||  // SUB SP,SP,#imm
+                                  (word & 0xFFE003FF) == 0xA9400000;     // STP (load variant)
+        if (!looksLikeFunction) {
+            LOGI("[T1][%2d] %-28s @ +0x%06lx SKIPPED (word=0x%08X, offset mismatch for this ACE build)",
+                 i, ANORT_PATCHES[i].name,
+                 (long)ANORT_PATCHES[i].offset, word);
+            continue;
+        }
+
         bool ok = SafePatchReturn0(addr);
         LOGI("[T1][%2d] %-28s @ libanort+0x%06lx → %s",
              i, ANORT_PATCHES[i].name,
