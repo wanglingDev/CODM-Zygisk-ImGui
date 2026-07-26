@@ -3,7 +3,6 @@
 #include <unistd.h>
 #include <sys/system_properties.h>
 #include <dlfcn.h>
-#include <dlfcn.h>
 #include <cstdlib>
 #include <cinttypes>
 #include <string>
@@ -20,7 +19,12 @@
 #include "KittyMemory/MemoryPatch.h"
 #include "KittyMemory/KittyScanner.h"
 #include "KittyMemory/KittyUtils.h"
-#include "Includes/Dobby/dobby.h"
+// ── ShadowHook 2.0.1 — island-trampoline inline hook ──────────────
+#include "shadowhook.h"
+// ── ByteHook 1.1.1 — PLT/GOT hook (zero byte-patch at hook site) ──
+#include "bytehook.h"
+// ── xDL 2.4.0 — enhanced dlopen/dlsym + solist hiding ─────────────
+#include "xdl.h"
 #include "Include/Unity.h"
 #include "Misc.h"
 #include "hook.h"
@@ -29,7 +33,6 @@
 #include <chrono>
 #include "Include/Quaternion.h"
 #include "Include/Rect.h"
-#include <fstream>
 #include <limits>
 #include <sys/mman.h>
 #include <sys/prctl.h>
@@ -40,40 +43,35 @@
 
 #define GamePackageName "com.garena.game.codm"
 
-// ══════════════════════════════════════════════════════════════════════════════
-//  STRONG BYPASS — 4-layer stealth
-//  1. ELF header wipe        — kills magic-byte scan of our .so in memory
-//  2. Anonymous remap        — removes file-backed entry from /proc/self/maps
-//  3. Anti-ptrace            — blocks attach-based debuggers / scanners
-//  4. Fake prctl name        — masks thread name from process inspectors
-// ══════════════════════════════════════════════════════════════════════════════
+// ══════════════════════════════════════════════════════════════════
+//  BYPASS — 5 layers
+//  1. ELF header wipe        — kills magic-byte scan
+//  2. Anonymous remap        — hides from /proc/self/maps
+//  3. Solist removal (xDL)   — hides from linker soinfo chain
+//  4. Anti-ptrace            — PR_SET_DUMPABLE=0
+//  5. Thread name spoof      — "AsyncTask #2" (more realistic than
+//                              FinalizerDaemon for a non-GC thread)
+// ══════════════════════════════════════════════════════════════════
 
-// ── Layer 1 & 2: remap own library as anonymous ───────────────────────────────
-// Technique: copy each file-backed segment of ourselves into a new anonymous
-// mapping, then munmap the original.  After this our code is still running but
-// nothing with a path shows in /proc/self/maps — same approach as reveny's
-// "remap hide" in Android-ImGui-Mod-Menu.
+// ── Layer 1 & 2: remap + ELF wipe ────────────────────────────────
 struct LibRegion { uintptr_t start, end; };
 
 static int CollectSelfRegions_cb(dl_phdr_info* info, size_t, void* data) {
-    // Match the segment that contains our own code
     Dl_info di;
-    extern void bypass_remap_self(); // forward
+    extern void bypass_remap_self();
     if (!dladdr((void*)bypass_remap_self, &di)) return 0;
     if (!di.dli_fbase || (uintptr_t)di.dli_fbase != info->dlpi_addr) return 0;
 
-    std::vector<LibRegion>* regions = (std::vector<LibRegion>*)data;
+    auto* regions = (std::vector<LibRegion>*)data;
     for (int i = 0; i < (int)info->dlpi_phnum; i++) {
         const ElfW(Phdr)& ph = info->dlpi_phdr[i];
         if (ph.p_type != PT_LOAD) continue;
-        uintptr_t seg_start = info->dlpi_addr + ph.p_vaddr;
-        uintptr_t seg_end   = seg_start + ph.p_memsz;
-        // align to page
-        seg_start &= ~(uintptr_t)(getpagesize() - 1);
-        seg_end    = (seg_end + getpagesize() - 1) & ~(uintptr_t)(getpagesize() - 1);
-        regions->push_back({seg_start, seg_end});
+        uintptr_t s = (info->dlpi_addr + ph.p_vaddr) & ~(uintptr_t)(getpagesize()-1);
+        uintptr_t e = (info->dlpi_addr + ph.p_vaddr + ph.p_memsz + getpagesize()-1)
+                      & ~(uintptr_t)(getpagesize()-1);
+        regions->push_back({s, e});
     }
-    return 1; // stop iteration
+    return 1;
 }
 
 void bypass_remap_self() {
@@ -82,107 +80,273 @@ void bypass_remap_self() {
 
     for (auto& r : regions) {
         size_t sz = r.end - r.start;
-        // Allocate anonymous backing
-        void* anon = mmap(nullptr, sz, PROT_READ | PROT_WRITE,
-                          MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        void* anon = mmap(nullptr, sz, PROT_READ|PROT_WRITE,
+                          MAP_PRIVATE|MAP_ANONYMOUS, -1, 0);
         if (anon == MAP_FAILED) continue;
 
-        // Copy content
         memcpy(anon, (void*)r.start, sz);
 
-        // Wipe ELF magic in original (Layer 1: magic-byte scan defeated)
-        // Only on the first (lowest) segment which holds the ELF header
+        // Wipe ELF magic on first segment
         if (r.start == regions[0].start) {
-            mprotect((void*)r.start, getpagesize(), PROT_READ | PROT_WRITE);
-            memset((void*)r.start, 0, 4); // zero ELF magic "\x7fELF"
+            mprotect((void*)r.start, getpagesize(), PROT_READ|PROT_WRITE);
+            memset((void*)r.start, 0, 4);
         }
 
-        // Unmap original file-backed pages (Layer 2: removed from /proc/maps)
         munmap((void*)r.start, sz);
 
-        // Map our copy at the same address with RX permissions
-        void* remapped = mmap((void*)r.start, sz,
-                              PROT_READ | PROT_EXEC,
-                              MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED,
-                              -1, 0);
-        if (remapped == MAP_FAILED) {
-            // If fixed-map fails, copy back to anon (code still runs from anon)
-            mprotect(anon, sz, PROT_READ | PROT_EXEC);
+        void* fixed = mmap((void*)r.start, sz,
+                           PROT_READ|PROT_EXEC,
+                           MAP_PRIVATE|MAP_ANONYMOUS|MAP_FIXED, -1, 0);
+        if (fixed == MAP_FAILED) {
+            mprotect(anon, sz, PROT_READ|PROT_EXEC);
         } else {
-            memcpy(remapped, anon, sz);
-            mprotect(remapped, sz, PROT_READ | PROT_EXEC);
+            memcpy(fixed, anon, sz);
+            mprotect(fixed, sz, PROT_READ|PROT_EXEC);
             munmap(anon, sz);
         }
     }
-    LOGI("[ENI] bypass: library remapped as anonymous (hidden from /proc/maps)");
+    LOGI("[ENI] bypass L1+L2: remap+ELF wipe done");
 }
 
-// ── Layer 3: anti-ptrace ──────────────────────────────────────────────────────
-// PR_SET_DUMPABLE 0 prevents any external process from ptrace-attaching to us.
-// CODM anti-cheat uses ptrace to inspect memory regions of suspicious threads.
+// ── Layer 3: xDL solist removal ───────────────────────────────────
+static void bypass_hide_soinfo() {
+    Dl_info di;
+    if (!dladdr((void*)bypass_hide_soinfo, &di) || !di.dli_fname) {
+        LOGI("[ENI] bypass L3: dladdr failed, skip soinfo hide");
+        return;
+    }
+
+    // xDL enhanced open — bypasses Android 7+ namespace restrictions
+    void* xhandle = xdl_open(di.dli_fname, XDL_DEFAULT);
+    if (!xhandle) {
+        LOGI("[ENI] bypass L3: xdl_open failed (%s)", di.dli_fname);
+        return;
+    }
+
+    xdl_info_t xinfo;
+    if (xdl_info(xhandle, XDL_DI_DLINFO, &xinfo) == 0) {
+        LOGI("[ENI] bypass L3: xdl confirmed lib @ %p (%s)",
+             xinfo.dli_fbase, xinfo.dli_fname ? xinfo.dli_fname : "anonymous");
+    }
+    xdl_close(xhandle);
+
+    // Manual solist walk — unlink our soinfo from the linker chain.
+    // Works Android 5–16; solist head is at __dl__ZL6solist in linker.
+    struct soinfo_partial {
+        char             padding[0x10];
+        soinfo_partial*  next;
+    };
+
+    void* linker = dlopen(
+#ifdef __aarch64__
+        "/apex/com.android.runtime/bin/linker64",
+#else
+        "/apex/com.android.runtime/bin/linker",
+#endif
+        RTLD_LAZY | RTLD_NOLOAD);
+
+    if (!linker) linker = dlopen(
+#ifdef __aarch64__
+        "/system/bin/linker64",
+#else
+        "/system/bin/linker",
+#endif
+        RTLD_LAZY | RTLD_NOLOAD);
+
+    if (!linker) {
+        LOGI("[ENI] bypass L3: linker dlopen failed, skip manual solist");
+        return;
+    }
+
+    soinfo_partial** solist_head =
+        (soinfo_partial**)dlsym(linker, "__dl__ZL6solist");
+    if (!solist_head || !*solist_head)
+        solist_head = (soinfo_partial**)dlsym(linker, "__dl_g_soinfo_handles_map");
+
+    if (!solist_head) {
+        LOGI("[ENI] bypass L3: solist symbol not found, relying on remap+xdl");
+        dlclose(linker);
+        return;
+    }
+
+    uintptr_t our_base = (uintptr_t)di.dli_fbase;
+    soinfo_partial* prev = nullptr;
+    soinfo_partial* cur  = *solist_head;
+    int removed = 0;
+
+    while (cur) {
+        uintptr_t candidate = *(uintptr_t*)((uintptr_t)cur + 0x18);
+        if (candidate == our_base) {
+            if (prev) prev->next = cur->next;
+            else       *solist_head = cur->next;
+            removed++;
+            LOGI("[ENI] bypass L3: soinfo unlinked @ %p", (void*)cur);
+            break;
+        }
+        prev = cur;
+        cur  = cur->next;
+    }
+
+    if (!removed)
+        LOGI("[ENI] bypass L3: soinfo not found (may already be gone after remap)");
+
+    dlclose(linker);
+}
+
+// ── Layer 4: anti-ptrace ──────────────────────────────────────────
 static void bypass_anti_ptrace() {
     prctl(PR_SET_DUMPABLE, 0, 0, 0, 0);
-    LOGI("[ENI] bypass: PR_SET_DUMPABLE=0 (anti-ptrace active)");
+    LOGI("[ENI] bypass L4: PR_SET_DUMPABLE=0");
 }
 
-// ── Layer 4: thread name spoofing ────────────────────────────────────────────
-// Rename hack_thread to something benign so thread inspectors see nothing odd.
+// ── Layer 5: thread name spoof ────────────────────────────────────
 static void bypass_spoof_thread_name() {
-    prctl(PR_SET_NAME, "FinalizerDaemon", 0, 0, 0);
-    LOGI("[ENI] bypass: thread name spoofed to FinalizerDaemon");
+    // "AsyncTask #2" — plausible non-GC worker thread name.
+    // "FinalizerDaemon" would flag itself because ACE knows that name
+    // belongs to the JVM GC thread and can cross-check thread binding.
+    prctl(PR_SET_NAME, "AsyncTask #2", 0, 0, 0);
+    LOGI("[ENI] bypass L5: thread name → 'AsyncTask #2'");
 }
 
-// ── Master bypass entry — call once at start of hack_thread ──────────────────
+// ── Master bypass ─────────────────────────────────────────────────
 static void RunAllBypasses() {
-    bypass_spoof_thread_name();
-    bypass_anti_ptrace();
-    // Remap runs last: after this our .so disappears from maps
-    // Small sleep ensures il2cpp is loaded before we remap (avoids map race)
-    sleep(2);
-    bypass_remap_self();
+    bypass_spoof_thread_name();   // L5 first — name set before any scan window
+    bypass_anti_ptrace();          // L4
+    sleep(2);                      // wait for il2cpp to settle before remap
+    bypass_remap_self();           // L1+L2
+    bypass_hide_soinfo();          // L3 — after remap so our base is confirmed
 }
 
-int glHeight, glWidth;
+// ══════════════════════════════════════════════════════════════════
+//  SHADOWHOOK 2.0.1 — island-trampoline inline hook
+//  Used for: hooks where we need the original function pointer
+//  (input handlers, game function hooks)
+//  NOT used for eglSwapBuffers — ByteHook PLT is stealthier there.
+// ══════════════════════════════════════════════════════════════════
+static bool g_shadowhook_inited = false;
 
-int isGame(JNIEnv *env, jstring appDataDir)
-{
-    if (!appDataDir)
-        return 0;
-    const char *app_data_dir = env->GetStringUTFChars(appDataDir, nullptr);
+static void InitShadowHook() {
+    if (g_shadowhook_inited) return;
+    int r = shadowhook_init(SHADOWHOOK_MODE_UNIQUE, false);
+    LOGI("[ENI] shadowhook_init: %d (%s)", r, r == 0 ? "OK" : shadowhook_to_errmsg(r));
+    g_shadowhook_inited = (r == 0);
+}
+
+// Macro: same call-site as DobbyHook was, now routes to ShadowHook
+#define SHHook(addr, fn, orig) \
+    shadowhook_hook_func_addr((void*)(addr), (void*)(fn), (void**)(orig))
+
+// ══════════════════════════════════════════════════════════════════
+//  BYTEHOOK 1.1.1 — PLT/GOT hook for eglSwapBuffers
+//
+//  Why PLT over ShadowHook inline here:
+//  ShadowHook writes an island trampoline but still patches the first
+//  instruction of the target function — ACE's library_integrity_scanner
+//  (libanort T1[6]) specifically walks .text looking for modified
+//  prologues. ByteHook instead overwrites the GOT *pointer* inside
+//  libunity.so's .got.plt — no instruction bytes are touched.
+//  ACE doesn't scan GOT entries, so this is a structural blind spot.
+//
+//  Strategy:
+//    bytehook_hook_single("libunity.so", "libEGL.so", "eglSwapBuffers", ...)
+//    — hooks the GOT entry in libunity.so that resolves to libEGL's
+//      eglSwapBuffers. Calls from libunity → our hook → original.
+//    We also hook it in libGameAssembly.so for full coverage.
+// ══════════════════════════════════════════════════════════════════
+static bool           g_bytehook_inited  = false;
+static bytehook_stub_t g_egl_stub_unity  = nullptr;
+static bytehook_stub_t g_egl_stub_game   = nullptr;
+
+// Forward-declare the hook function — defined below with eglSwapBuffers type
+static EGLBoolean hook_eglSwapBuffers(EGLDisplay dpy, EGLSurface surface);
+static EGLBoolean (*old_eglSwapBuffers)(EGLDisplay, EGLSurface) = nullptr;
+
+static void InitByteHook() {
+    if (g_bytehook_inited) return;
+    int r = bytehook_init(BYTEHOOK_MODE_AUTOMATIC, false);
+    LOGI("[ENI] bytehook_init: %d (%s)", r, r == 0 ? "OK" : bytehook_get_error_name(r));
+    g_bytehook_inited = (r == 0);
+}
+
+// PLT hook installer — called after il2cpp is confirmed loaded
+static void InstallEGLPLTHook() {
+    if (!g_bytehook_inited) {
+        LOGE("[ENI] bytehook not initialised — EGL PLT hook skipped");
+        return;
+    }
+
+    // Hook eglSwapBuffers in libunity.so's GOT (primary call site)
+    g_egl_stub_unity = bytehook_hook_single(
+        "libunity.so",           // caller lib — where the GOT entry lives
+        "libEGL.so",             // callee lib — where the symbol resolves from
+        "eglSwapBuffers",        // symbol name
+        (void*)hook_eglSwapBuffers,
+        nullptr,                 // hooked callback (not needed)
+        nullptr                  // hooked callback arg
+    );
+    LOGI("[ENI] eglSwapBuffers PLT hook (unity.so): %s",
+         g_egl_stub_unity ? "OK" : "FAILED");
+
+    // Also hook in libGameAssembly.so — some CODM builds call EGL directly
+    g_egl_stub_game = bytehook_hook_single(
+        "libGameAssembly.so",
+        "libEGL.so",
+        "eglSwapBuffers",
+        (void*)hook_eglSwapBuffers,
+        nullptr,
+        nullptr
+    );
+    LOGI("[ENI] eglSwapBuffers PLT hook (GameAssembly.so): %s",
+         g_egl_stub_game ? "OK" : "FAILED (non-fatal if lib absent)");
+}
+
+// ── eglSwapBuffers hook implementation ───────────────────────────
+// BYTEHOOK_STACK_SCOPE() sets up the callstack for BYTEHOOK_CALL_PREV
+// so we can safely call the original without a stored pointer.
+static EGLBoolean hook_eglSwapBuffers(EGLDisplay dpy, EGLSurface surface) {
+    BYTEHOOK_STACK_SCOPE();
+
+    // ── ImGui render ─────────────────────────────────────────────
+    ImGui::Render();
+    ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
+
+    // ── Call original via ByteHook's trampoline ───────────────────
+    return BYTEHOOK_CALL_PREV(hook_eglSwapBuffers, dpy, surface);
+}
+
+// ══════════════════════════════════════════════════════════════════
+//  GAME LOGIC
+// ══════════════════════════════════════════════════════════════════
+int isGame(JNIEnv *env, jstring appDataDir) {
+    if (!appDataDir) return 0;
+    const char* app_data_dir = env->GetStringUTFChars(appDataDir, nullptr);
     int user = 0;
     static char package_name[256];
-    if (sscanf(app_data_dir, "/data/%*[^/]/%d/%s", &user, package_name) != 2) {
-        if (sscanf(app_data_dir, "/data/%*[^/]/%s", package_name) != 1) {
-            package_name[0] = '\0';
-            LOGW(OBFUSCATE("can't parse %s"), app_data_dir);
-            return 0;
-        }
-    }
+    if (sscanf(app_data_dir, "/data/%*[^/]/%d/%s", &user, package_name) != 2)
+        if (sscanf(app_data_dir, "/data/%*[^/]/%s", package_name) != 1)
+            { package_name[0] = '\0'; env->ReleaseStringUTFChars(appDataDir, app_data_dir); return 0; }
+
     if (strcmp(package_name, GamePackageName) == 0) {
         LOGI(OBFUSCATE("detect game: %s"), package_name);
-        game_data_dir = new char[strlen(app_data_dir) + 1];
+        game_data_dir = new char[strlen(app_data_dir)+1];
         strcpy(game_data_dir, app_data_dir);
         env->ReleaseStringUTFChars(appDataDir, app_data_dir);
         return 1;
-    } else {
-        env->ReleaseStringUTFChars(appDataDir, app_data_dir);
-        return 0;
     }
+    env->ReleaseStringUTFChars(appDataDir, app_data_dir);
+    return 0;
 }
 
-bool setupimg;
-
-HOOKAF(void, Input, void *thiz, void *ex_ab, void *ex_ac)
-{
+// ── Input hooks (ShadowHook island-trampoline) ────────────────────
+HOOKAF(void, Input, void *thiz, void *ex_ab, void *ex_ac) {
     origInput(thiz, ex_ab, ex_ac);
-    ImGui_ImplAndroid_HandleInputEvent((AInputEvent *)thiz);
-    return;
+    ImGui_ImplAndroid_HandleInputEvent((AInputEvent*)thiz);
 }
 
-HOOKAF(int32_t, Consume, void *thiz, void *arg1, bool arg2, long arg3, uint32_t *arg4, AInputEvent **input_event)
-{
+HOOKAF(int32_t, Consume, void *thiz, void *arg1, bool arg2, long arg3,
+       uint32_t *arg4, AInputEvent **input_event) {
     auto result = origConsume(thiz, arg1, arg2, arg3, arg4, input_event);
-    if(result != 0 || *input_event == nullptr) return result;
+    if (result != 0 || *input_event == nullptr) return result;
     ImGui_ImplAndroid_HandleInputEvent(*input_event);
     return result;
 }
@@ -190,59 +354,45 @@ HOOKAF(int32_t, Consume, void *thiz, void *arg1, bool arg2, long arg3, uint32_t 
 #include "functions.h"
 #include "menu.h"
 
+// ══════════════════════════════════════════════════════════════════
+//  HACK THREAD
+// ══════════════════════════════════════════════════════════════════
 void *hack_thread(void *arg) {
-    // ── Stealth first, everything else second ─────────────────────────────
+    // ── Surface + solist bypass ───────────────────────────────────
     RunAllBypasses();
-    LOGI("[ENI] hack_thread: started, scanning for il2cpp library...");
 
-    // Garena CODM merges IL2CPP directly into libunity.so — confirmed by
-    // logcat lib dump: libil2cpp.so never appears in /proc/self/maps.
-    // libunity.so is always the correct base for RVAs from this dump.cs.
-    static const char* IL2CPP_CANDIDATES[] = {
-        "libunity.so",      // ← CODM Garena: IL2CPP merged here (confirmed)
-        "libil2cpp.so",     // standard Unity IL2CPP build
-        "libGameAssembly.so",
-        "libCODM.so",
-        "libcodm.so",
-        nullptr
+    // ── Init hook engines ─────────────────────────────────────────
+    InitShadowHook();   // island-trampoline for game hooks
+    InitByteHook();     // PLT/GOT hook for EGL
+
+    LOGI("[ENI] hack_thread: scanning for il2cpp...");
+
+    static const char* CANDIDATES[] = {
+        "libunity.so", "libil2cpp.so", "libGameAssembly.so", nullptr
     };
 
-    int wait_iters = 0;
-    while (!g_il2cppBaseMap.isValid() && wait_iters < 90) {
-        sleep(1);
-        ++wait_iters;
-
-        // Try each candidate name
-        for (int ci = 0; IL2CPP_CANDIDATES[ci]; ci++) {
-            g_il2cppBaseMap = KittyMemory::getLibraryBaseMap(IL2CPP_CANDIDATES[ci]);
+    int iters = 0;
+    while (!g_il2cppBaseMap.isValid() && iters < 90) {
+        sleep(1); ++iters;
+        for (int i = 0; CANDIDATES[i]; i++) {
+            g_il2cppBaseMap = KittyMemory::getLibraryBaseMap(CANDIDATES[i]);
             if (g_il2cppBaseMap.isValid()) {
-                LOGI("[ENI] il2cpp library found as '%s'", IL2CPP_CANDIDATES[ci]);
+                LOGI("[ENI] il2cpp found as '%s'", CANDIDATES[i]);
                 break;
             }
         }
-
-        // Every 10 s, dump all game .so files to logcat for diagnosis
-        if (wait_iters % 10 == 0) {
-            LOGI("[ENI] still searching... (%ds) — dumping loaded libs:", wait_iters);
+        if (iters % 10 == 0) {
+            LOGI("[ENI] still searching... (%ds)", iters);
             FILE* maps = fopen("/proc/self/maps", "r");
             if (maps) {
-                char line[512];
-                char last_lib[512] = "";
+                char line[512], last[512] = "";
                 while (fgets(line, sizeof(line), maps)) {
-                    // only print executable .so segments, skip system libs
                     if (!strstr(line, ".so")) continue;
-                    if (strstr(line, "/system/") || strstr(line, "/vendor/") ||
-                        strstr(line, "/apex/")   || strstr(line, "bionic")) continue;
-                    char* slash = strrchr(line, '/');
-                    if (!slash) continue;
-                    // deduplicate consecutive same-lib lines
-                    slash++;
-                    char* nl = strchr(slash, '\n');
-                    if (nl) *nl = 0;
-                    if (strcmp(slash, last_lib) != 0) {
-                        LOGI("[ENI]   lib: %s", slash);
-                        strncpy(last_lib, slash, sizeof(last_lib)-1);
-                    }
+                    if (strstr(line,"/system/")||strstr(line,"/vendor/")||strstr(line,"/apex/")) continue;
+                    char* sl = strrchr(line, '/');
+                    if (!sl) continue; sl++;
+                    char* nl = strchr(sl, '\n'); if (nl) *nl = 0;
+                    if (strcmp(sl, last)) { LOGI("[ENI]   lib: %s", sl); strncpy(last,sl,511); }
                 }
                 fclose(maps);
             }
@@ -250,73 +400,48 @@ void *hack_thread(void *arg) {
     }
 
     if (!g_il2cppBaseMap.isValid()) {
-        LOGE("[ENI] FATAL: il2cpp library not found after 90 s — check logcat lib dump above");
+        LOGE("[ENI] FATAL: il2cpp not found after 90s");
         return nullptr;
     }
 
-    LOGI("[ENI] il2cpp base: %p", (void*)g_il2cppBaseMap.startAddress);
+    LOGI("[ENI] il2cpp base: 0x%" PRIxPTR, (uintptr_t)g_il2cppBaseMap.startAddress);
     Pointers();
     Hooks();
     InstallFeatureHooks();
 
-    // ── eglSwapBuffers ────────────────────────────────────────────────────────
-    void* eglSwapBuffers = nullptr;
+    // ── eglSwapBuffers — PLT hook via ByteHook ────────────────────
+    // No dlsym or address needed: ByteHook resolves the GOT entry
+    // inside the caller lib automatically. Zero instruction bytes
+    // are modified — ACE's .text scanner sees nothing.
+    InstallEGLPLTHook();
 
-    auto eglhandle = dlopen("libEGL.so", RTLD_LAZY);
-    if (eglhandle) {
-        eglSwapBuffers = dlsym(eglhandle, "eglSwapBuffers");
-        if (eglSwapBuffers)
-            LOGI("[ENI] eglSwapBuffers found in libEGL.so @ %p", eglSwapBuffers);
-        else
-            LOGI("[ENI] libEGL.so opened but eglSwapBuffers symbol missing");
-    } else {
-        LOGE("[ENI] dlopen(libEGL.so) failed: %s", dlerror());
-    }
-
-    if (!eglSwapBuffers) {
-        auto unityhandle = dlopen("libunity.so", RTLD_LAZY);
-        if (unityhandle) {
-            eglSwapBuffers = dlsym(unityhandle, "eglSwapBuffers");
-            if (eglSwapBuffers)
-                LOGI("[ENI] eglSwapBuffers found in libunity.so (fallback) @ %p", eglSwapBuffers);
-        }
-    }
-
-    if (eglSwapBuffers) {
-        int dret = DobbyHook((void*)eglSwapBuffers, (void*)hook_eglSwapBuffers,
-                             (void**)&old_eglSwapBuffers);
-        if (dret == 0)
-            LOGI("[ENI] eglSwapBuffers hooked successfully!");
-        else
-            LOGE("[ENI] DobbyHook(eglSwapBuffers) FAILED, ret=%d", dret);
-    } else {
-        LOGE("[ENI] eglSwapBuffers NOT FOUND — game may use Vulkan. Menu will not render.");
-        LOGE("[ENI] Run: adb shell setprop debug.hwui.renderer opengl  and restart game");
-    }
-
-    // ── Input hooks ──────────────────────────────────────────────────────────
+    // ── Input hooks via ShadowHook (island trampoline) ────────────
 #ifdef __aarch64__
-    #define LIBINPUT_PATH "/system/lib64/libinput.so"
+    #define LIBINPUT "/system/lib64/libinput.so"
 #else
-    #define LIBINPUT_PATH "/system/lib/libinput.so"
+    #define LIBINPUT "/system/lib/libinput.so"
 #endif
 
-    void *sym_input = DobbySymbolResolver(LIBINPUT_PATH,
-        "_ZN7android13InputConsumer21initializeMotionEventEPNS_11MotionEventEPKNS_12InputMessageE");
-    if (sym_input) {
-        int r = DobbyHook(sym_input, (void*)myInput, (void**)&origInput);
-        LOGI("[ENI] initializeMotionEvent hook: %s", r==0?"OK":"FAILED");
-    } else {
-        LOGI("[ENI] initializeMotionEvent not found in %s (non-fatal)", LIBINPUT_PATH);
-    }
+    void* libinput = xdl_open(LIBINPUT, XDL_DEFAULT);
+    if (libinput) {
+        void* sym = xdl_sym(libinput,
+            "_ZN7android13InputConsumer21initializeMotionEventEPNS_11MotionEventEPKNS_12InputMessageE",
+            nullptr);
+        if (sym) {
+            void* s = SHHook(sym, myInput, &origInput);
+            LOGI("[ENI] initializeMotionEvent: %s", s?"OK":"FAILED");
+        }
 
-    sym_input = DobbySymbolResolver(LIBINPUT_PATH,
-        "_ZN7android13InputConsumer7consumeEPNS_26InputEventFactoryInterfaceEblPjPPNS_10InputEventE");
-    if (sym_input) {
-        int r = DobbyHook(sym_input, (void*)myConsume, (void**)&origConsume);
-        LOGI("[ENI] consume hook: %s", r==0?"OK":"FAILED");
+        sym = xdl_sym(libinput,
+            "_ZN7android13InputConsumer7consumeEPNS_26InputEventFactoryInterfaceEblPjPPNS_10InputEventE",
+            nullptr);
+        if (sym) {
+            void* s = SHHook(sym, myConsume, &origConsume);
+            LOGI("[ENI] consume hook: %s", s?"OK":"FAILED");
+        }
+        xdl_close(libinput);
     } else {
-        LOGI("[ENI] consume not found in %s (non-fatal)", LIBINPUT_PATH);
+        LOGI("[ENI] libinput xdl_open failed (non-fatal)");
     }
 
     LOGI("[ENI] hack_thread: setup complete!");

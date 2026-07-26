@@ -27,6 +27,14 @@ set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${C_FLAGS} ${CXX_FLAGS}")
 set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} ${LINKER_FLAGS}")
 set(CMAKE_MODULE_LINKER_FLAGS "${CMAKE_MODULE_LINKER_FLAGS} ${LINKER_FLAGS}")
 
+# ── Prefab packages (via Gradle dependencies) ─────────────────────────────────
+# xDL 2.4.0  — enhanced dlopen/dlsym + solist manipulation
+find_package(xdl REQUIRED CONFIG)
+# ShadowHook 2.0.1 — island-trampoline inline hook, replaces Dobby
+find_package(shadowhook REQUIRED CONFIG)
+# ByteHook 1.1.1 — PLT/GOT hook (zero byte-patch at hook site)
+find_package(bytehook REQUIRED CONFIG)
+
 include_directories(KittyMemory)
 include_directories(Include)
 include_directories(Includes)
@@ -52,13 +60,15 @@ add_library(${MODULE_NAME}
         hook.cpp
         )
 
-set(DOBBY_LIB ${CMAKE_CURRENT_SOURCE_DIR}/libs/${CMAKE_ANDROID_ARCH_ABI}/libdobby.a)
+# libcurl stays (auth/network)
 set(CURL_LIB ${CMAKE_CURRENT_SOURCE_DIR}/libs/${CMAKE_ANDROID_ARCH_ABI}/libcurl.a)
+
 find_library(log-lib log)
 find_library(egl EGL)
 find_library(android android)
 find_library(GLESV2_LIB GLESv2)
 find_library(LZ_LIB z)
+
 if (${ANDROID_PLATFORM_LEVEL} LESS 12)
     message(FATAL_ERROR "OpenGL 2 is not supported before API level 11 /
                       (currently using ${ANDROID_PLATFORM_LEVEL}).")
@@ -72,13 +82,21 @@ else ()
 endif (${ANDROID_PLATFORM_LEVEL} LESS 12)
 
 target_link_libraries(
-        ${MODULE_NAME} log
-        ${DOBBY_LIB}
+        ${MODULE_NAME}
+        log
+        # ── Prefab libs (Dobby is gone) ────────────────────────────
+        xdl::xdl
+        shadowhook::shadowhook
+        bytehook::bytehook
+        # ── Static libs ────────────────────────────────────────────
         ${CURL_LIB}
+        # ── System libs ────────────────────────────────────────────
         ${OPENGL_LIB}
         ${GLESV2_LIB}
         ${android}
-        ${egl}  )
+        ${egl}
+)
+
 if (NOT CMAKE_BUILD_TYPE STREQUAL "Debug")
     add_custom_command(TARGET ${MODULE_NAME} POST_BUILD
             COMMAND ${CMAKE_STRIP} --strip-all --remove-section=.comment "${CMAKE_LIBRARY_OUTPUT_DIRECTORY}/lib${MODULE_NAME}.so")

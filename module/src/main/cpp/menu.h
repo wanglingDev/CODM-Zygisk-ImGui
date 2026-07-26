@@ -71,15 +71,15 @@ void InstallFeatureHooks() {
     #define _H(rva, fn, orig) \
         DobbyHook((void*)((uintptr_t)g_il2cppBaseMap.startAddress + (rva)), (void*)(fn), (void**)&(orig))
 
-    _H(0x5C3A100, hook_RecoilUpBase,  orig_RecoilUpBase );
-    _H(0x5C3A160, hook_RecoilLatBase, orig_RecoilLatBase);
-    _H(0x5C3A1C0, hook_RecoilUpMax,   orig_RecoilUpMax  );
-    _H(0x5C3A220, hook_RecoilLatMax,  orig_RecoilLatMax );
-    _H(0x5C3A280, hook_RecoilUpMod,   orig_RecoilUpMod  );
-    _H(0x5C3A2E0, hook_RecoilLatMod,  orig_RecoilLatMod );
+    //     _H(0x5C3A100, hook_RecoilUpBase,  orig_RecoilUpBase );
+    //     _H(0x5C3A160, hook_RecoilLatBase, orig_RecoilLatBase);
+    //     _H(0x5C3A1C0, hook_RecoilUpMax,   orig_RecoilUpMax  );
+    //     _H(0x5C3A220, hook_RecoilLatMax,  orig_RecoilLatMax );
+    //     _H(0x5C3A280, hook_RecoilUpMod,   orig_RecoilUpMod  );
+    //     _H(0x5C3A2E0, hook_RecoilLatMod,  orig_RecoilLatMod );
     #undef _H
 
-    LOGI("[ENI] InstallFeatureHooks: done");
+    LOGI("[ENI] InstallFeatureHooks: done (hooks disabled, pending RVA verify)");
 }
 
 // ════════════════════════════════════════════════════════════════
@@ -480,12 +480,10 @@ EGLBoolean hook_eglSwapBuffers(EGLDisplay display, EGLSurface surface) {
 
     float sw = (float)g_width, sh = (float)g_height;
 
-    // ESP on background draw list (behind menu)
-    ImDrawList* bgDL = ImGui::GetBackgroundDrawList();
-    DrawESP(bgDL, sw, sh);
-
-    // Aimbot
-    AimbotTick(sw, sh);
+    // ESP + Aimbot dimatikan sementara — aktifkan setelah RVA diverifikasi via logcat
+    // ImDrawList* bgDL = ImGui::GetBackgroundDrawList();
+    // DrawESP(bgDL, sw, sh);
+    // AimbotTick(sw, sh);
 
     // Mod menu
     DrawMenu();
