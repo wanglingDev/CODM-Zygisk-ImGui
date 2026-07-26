@@ -241,6 +241,23 @@ EGLBoolean hook_eglSwapBuffers(EGLDisplay dpy, EGLSurface surface) {
     ImGuiIO& io = GetIO();
     io.DisplaySize = ImVec2((float)glWidth, (float)glHeight);
 
+    // ── Manual frame timing ───────────────────────────────────────────────────
+    // ImGui_ImplAndroid_NewFrame() is the right call here, but it requires
+    // ImGui_ImplAndroid_Init(ANativeWindow*) to have been called first — and
+    // inside an EGL hook we have no ANativeWindow handle.
+    // Instead, drive io.DeltaTime ourselves with CLOCK_MONOTONIC, which is
+    // exactly what the Android backend does internally.
+    {
+        static double s_lastTime = 0.0;
+        struct timespec ts;
+        clock_gettime(CLOCK_MONOTONIC, &ts);
+        double now = (double)ts.tv_sec + (double)ts.tv_nsec * 1e-9;
+        io.DeltaTime = (s_lastTime > 0.0)
+                       ? (float)(now - s_lastTime)
+                       : (1.0f / 60.0f);      // sane default on first frame
+        s_lastTime   = now;
+    }
+
     ImGui_ImplOpenGL3_NewFrame();
     NewFrame();
 

@@ -104,7 +104,7 @@ struct Camera;
 // CORE FUNCTIONS
 // ================================================================
 Vector3 Transform_GetPos(uintptr_t transform) {
-    if (!transform) return {0,0,0};
+    if (!transform) return Vector3(0, 0, 0);
     auto fn = (Vector3(*)(uintptr_t))(METHOD(RVA_Transform_get_position));
     return fn(transform);
 }
@@ -115,14 +115,14 @@ Camera* Camera_GetMain() {
 }
 
 Vector3 Camera_WorldToScreen(Camera* cam, Vector3 pos) {
-    if (!cam) return {0,0,0};
+    if (!cam) return Vector3(0, 0, 0);
     auto fn = (Vector3(*)(Camera*, Vector3))(METHOD(RVA_Camera_WorldToScreen));
     return fn(cam, pos);
 }
 
 Vector3 WorldToScreen(Vector3 worldPos) {
     auto cam = Camera_GetMain();
-    if (!cam) return {0,0,0};
+    if (!cam) return Vector3(0, 0, 0);
     return Camera_WorldToScreen(cam, worldPos);
 }
 
@@ -226,22 +226,22 @@ Quaternion LookAt(Vector3 from, Vector3 to) {
     float pitch = -atan2f(dy, sqrtf(dx*dx+dz*dz));
     float cy = cosf(yaw*0.5f), sy = sinf(yaw*0.5f);
     float cp = cosf(pitch*0.5f), sp = sinf(pitch*0.5f);
-    return {sy*cp, cy*sp, -sy*sp, cy*cp};
+    return Quaternion(sy*cp, cy*sp, -sy*sp, cy*cp);
 }
 
 Quaternion QuatSlerp(Quaternion a, Quaternion b, float t) {
     float dot = a.X*b.X + a.Y*b.Y + a.Z*b.Z + a.W*b.W;
     if (dot < 0) { b.X=-b.X; b.Y=-b.Y; b.Z=-b.Z; b.W=-b.W; dot=-dot; }
     if (dot > 0.9995f) {
-        return { a.X + t*(b.X-a.X), a.Y + t*(b.Y-a.Y),
-                 a.Z + t*(b.Z-a.Z), a.W + t*(b.W-a.W) };
+        return Quaternion( a.X + t*(b.X-a.X), a.Y + t*(b.Y-a.Y),
+                 a.Z + t*(b.Z-a.Z), a.W + t*(b.W-a.W) );
     }
     float theta0 = acosf(dot);
     float theta  = theta0 * t;
     float s0 = cosf(theta) - dot * sinf(theta) / sinf(theta0);
     float s1 = sinf(theta) / sinf(theta0);
-    return { s0*a.X + s1*b.X, s0*a.Y + s1*b.Y,
-             s0*a.Z + s1*b.Z, s0*a.W + s1*b.W };
+    return Quaternion( s0*a.X + s1*b.X, s0*a.Y + s1*b.Y,
+             s0*a.Z + s1*b.Z, s0*a.W + s1*b.W );
 }
 
 void DoAimbot(uintptr_t target) {

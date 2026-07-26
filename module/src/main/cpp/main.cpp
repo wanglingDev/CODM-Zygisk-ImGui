@@ -1,42 +1,52 @@
 #include <pthread.h>
+#include <atomic>
 #include <cstring>
 #include <jni.h>
 #include "hook.h"
 
-// ================================================================
-// Entry Point 1: __attribute__((constructor))
-// Dipanggil OTOMATIS saat .so di-dlopen ke dalam proses game
-// Works dengan: AndKittyInjector, manual dlopen, dll
-// ================================================================
-__attribute__((constructor)) void lib_main() {
+// Guard against the constructor + JNI_OnLoad both spawning hack_thread.
+// When AndKittyInjector dlopen()s the .so, __attribute__((constructor)) fires
+// first (synchronously, inside dlopen), then JNI_OnLoad is called.
+// Without the guard, DobbyHook is called twice on the same address →
+// the trampoline is overwritten → hack_thread crashes silently before
+// eglSwapBuffers is hooked → no menu, no ESP, nothing.
+static std::atomic<bool> s_thread_started{false};
+
+static void spawn_hack_thread() {
+    // exchange returns the OLD value; if it was already true, bail out.
+    if (s_thread_started.exchange(true)) {
+        LOGI("spawn_hack_thread: already started, skipping duplicate spawn");
+        return;
+    }
     pthread_t ntid;
     int ret = pthread_create(&ntid, nullptr, hack_thread, nullptr);
     if (ret != 0) {
-        LOGE("lib_main: can't create hack_thread: %s", strerror(ret));
+        LOGE("spawn_hack_thread: pthread_create failed: %s", strerror(ret));
+        s_thread_started.store(false); // allow retry
     } else {
-        LOGI("lib_main: hack_thread spawned via constructor");
+        LOGI("spawn_hack_thread: hack_thread spawned OK");
         pthread_detach(ntid);
     }
 }
 
-// ================================================================
-// Entry Point 2: JNI_OnLoad
-// Dipanggil oleh AndKittyInjector setelah dlopen
-// key == 1337 artinya dipanggil oleh injector (bukan game biasa)
-// ================================================================
+// ── Entry Point 1: constructor ────────────────────────────────────────────────
+// Fires automatically on dlopen() — before JNI_OnLoad is invoked.
+__attribute__((constructor)) void lib_main() {
+    spawn_hack_thread();
+}
+
+// ── Entry Point 2: JNI_OnLoad ─────────────────────────────────────────────────
+// Called by AndKittyInjector after dlopen(); key == 1337 means injector call.
+// The constructor already fired → thread is already running.
+// We do NOT spawn again — just return the correct JNI version.
 extern "C" jint JNIEXPORT JNI_OnLoad(JavaVM* vm, void* key) {
-    // Kalau dipanggil oleh game biasa (bukan injector), skip
     if (key != (void*)1337) {
-        LOGI("JNI_OnLoad: called by game, skipping");
+        LOGI("JNI_OnLoad: not from injector, skipping");
         return JNI_VERSION_1_6;
     }
-
-    LOGI("JNI_OnLoad: called by AndKittyInjector!");
-
-    // Constructor sudah spawn thread, tapi kalau belum (race condition), spawn lagi
-    pthread_t ntid;
-    pthread_create(&ntid, nullptr, hack_thread, nullptr);
-    pthread_detach(ntid);
-
+    LOGI("JNI_OnLoad: injector call confirmed — constructor already spawned thread");
+    // spawn_hack_thread() is safe to call again; the atomic guard prevents
+    // a second thread from actually starting.
+    spawn_hack_thread();
     return JNI_VERSION_1_6;
 }
