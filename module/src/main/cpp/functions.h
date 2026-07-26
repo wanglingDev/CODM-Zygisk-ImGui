@@ -307,28 +307,21 @@ static float hook_get_JumpHeight(void* thiz) {
 }
 
 void InitPatches() {
-    // ShadowHook must already be initialised in hack_thread before this call.
-    void* stubSpeed = shadowhook_hook_func_addr(
-        (void*)METHOD(0x4F9B688),   // get_MaxSpeed
+    int r;
+
+    r = DobbyHook(
+        (void*)METHOD(0x4F9B688),   // get_MaxSpeed  — dump.cs 25/07/2026
         (void*)hook_get_MaxSpeed,
         (void**)&orig_get_MaxSpeed
     );
-    if (stubSpeed)
-        LOGI("[ENI] InitPatches: SpeedHack hook OK");
-    else
-        LOGI("[ENI] InitPatches: SpeedHack hook FAILED (%s)",
-             shadowhook_to_errmsg(shadowhook_get_errno()));
+    LOGI("[ENI] InitPatches: SpeedHack hook %s (r=%d)", r == 0 ? "OK" : "FAILED", r);
 
-    void* stubJump = shadowhook_hook_func_addr(
-        (void*)METHOD(0x5006AC4),   // get_JumpHeight
+    r = DobbyHook(
+        (void*)METHOD(0x5006AC4),   // get_JumpHeight — dump.cs 25/07/2026
         (void*)hook_get_JumpHeight,
         (void**)&orig_get_JumpHeight
     );
-    if (stubJump)
-        LOGI("[ENI] InitPatches: HighJump hook OK");
-    else
-        LOGI("[ENI] InitPatches: HighJump hook FAILED (%s)",
-             shadowhook_to_errmsg(shadowhook_get_errno()));
+    LOGI("[ENI] InitPatches: HighJump hook %s (r=%d)", r == 0 ? "OK" : "FAILED", r);
 }
 
 void TickPatches() {
