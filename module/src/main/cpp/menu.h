@@ -121,23 +121,21 @@ void RenderESP(int screenW, int screenH) {
 // IMGUI MENU
 // ================================================================
 void DrawMenu() {
+    // Menu selalu tampil otomatis saat in-game.
+    // Tap pojok kanan atas (area 60×60 px) untuk hide/show sementara.
     static bool showMenu = true;
-
-    // Toggle menu dengan button invisible di pojok
-    // Toggle: triple-tap the top-left 60×60 px corner within 0.5 s.
-    // ImGuiKey_VolumeUp does not exist in this ImGui version and
-    // AKEYCODE_VOLUME_UP is not mapped by imgui_impl_android.cpp.
     {
-        static int  _tapCount   = 0;
-        static float _lastTapT  = 0.f;
+        static float _lastTapT = 0.f;
         if (IsMouseClicked(0)) {
-            const ImVec2& mp = GetIO().MousePos;
-            if (mp.x < 60.f && mp.y < 60.f) {
+            const ImVec2& mp  = GetIO().MousePos;
+            const float   sw  = GetIO().DisplaySize.x;
+            // pojok KANAN atas — jauh dari kontrol game yang biasanya di kiri
+            if (mp.x > sw - 60.f && mp.y < 60.f) {
                 float now = (float)GetTime();
-                if (now - _lastTapT < 0.5f) _tapCount++;
-                else                         _tapCount = 1;
-                _lastTapT = now;
-                if (_tapCount >= 3) { showMenu = !showMenu; _tapCount = 0; }
+                if (now - _lastTapT > 0.3f) {   // debounce 300 ms
+                    showMenu   = !showMenu;
+                    _lastTapT  = now;
+                }
             }
         }
     }
