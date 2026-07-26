@@ -84,14 +84,15 @@ HOOKAF(int32_t, Consume, void *thiz, void *arg1, bool arg2, long arg3, uint32_t 
 void *hack_thread(void *arg) {
     LOGI("[ENI] hack_thread: started, scanning for il2cpp library...");
 
-    // Garena CODM sometimes names the IL2CPP library differently.
-    // Try all known names; log every loaded .so every 10 s so we can diagnose.
+    // Garena CODM merges IL2CPP directly into libunity.so — confirmed by
+    // logcat lib dump: libil2cpp.so never appears in /proc/self/maps.
+    // libunity.so is always the correct base for RVAs from this dump.cs.
     static const char* IL2CPP_CANDIDATES[] = {
-        "libil2cpp.so",
+        "libunity.so",      // ← CODM Garena: IL2CPP merged here (confirmed)
+        "libil2cpp.so",     // standard Unity IL2CPP build
         "libGameAssembly.so",
         "libCODM.so",
         "libcodm.so",
-        "libUE4.so",  // unlikely but included
         nullptr
     };
 

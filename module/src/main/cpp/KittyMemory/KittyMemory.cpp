@@ -300,7 +300,13 @@ namespace KittyMemory {
         
         for (auto &it : maps)
         {
-            if (!it.isValid() || it.writeable || !it.is_private) continue;
+            // FIXED: removed !it.is_private check.
+            // CODM Garena loads libunity.so directly from the APK zip via
+            // shared mapping (perms show 's' not 'p' in /proc/self/maps).
+            // The old filter silently skipped every entry for libunity.so,
+            // making getLibraryBaseMap always return an invalid map.
+            // The ELF magic check below is the correct and sufficient guard.
+            if (!it.isValid() || it.writeable) continue;
 
             if (memcmp((const void *)it.startAddress, "\177ELF", 4) == 0)
             {
