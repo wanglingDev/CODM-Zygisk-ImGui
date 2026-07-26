@@ -1,61 +1,40 @@
-// ── Zygisk module entry point ─────────────────────────────────────────────────
-// This replaces the raw constructor + JNI_OnLoad approach.
-// With REGISTER_ZYGISK_MODULE, our code ONLY runs inside the target game
-// process — not in zygote, system_server, or any other app.
-// Without this, enabling Zygisk + constructor = .so fires in every process.
-
-#include <jni.h>
 #include <pthread.h>
 #include <atomic>
 #include <cstring>
+#include <jni.h>
 #include "hook.h"
-#include "zygisk.hpp"
-
-using zygisk::Api;
-using zygisk::AppSpecializeArgs;
 
 static std::atomic<bool> s_started{false};
 
 static void spawn_once() {
-    if (s_started.exchange(true)) return;
-    pthread_t tid;
-    if (pthread_create(&tid, nullptr, hack_thread, nullptr) == 0) {
-        LOGI("[ENI] hack_thread spawned from Zygisk postAppSpecialize");
-        pthread_detach(tid);
-    } else {
-        LOGI("[ENI] pthread_create failed");
+    if (s_started.exchange(true)) {
+        LOGI("[ENI] spawn_once: thread already running, skipping");
+        return;
+    }
+    pthread_t ntid;
+    int ret = pthread_create(&ntid, nullptr, hack_thread, nullptr);
+    if (ret != 0) {
+        LOGE("[ENI] pthread_create FAILED: %s", strerror(ret));
         s_started.store(false);
+    } else {
+        LOGI("[ENI] hack_thread spawned OK");
+        pthread_detach(ntid);
     }
 }
 
-class CODMModule : public zygisk::ModuleBase {
-public:
-    void onLoad(Api* api, JNIEnv* env) override {
-        this->api = api;
-        this->env = env;
+// Fires on dlopen() — before JNI_OnLoad
+__attribute__((constructor)) void lib_main() {
+    LOGI("[ENI] constructor fired");
+    spawn_once();
+}
+
+// Called by AndKittyInjector after dlopen()
+extern "C" jint JNIEXPORT JNI_OnLoad(JavaVM* vm, void* key) {
+    if (key != (void*)1337) {
+        LOGI("[ENI] JNI_OnLoad: not injector call, skip");
+        return JNI_VERSION_1_6;
     }
-
-    // Called before the process is specialized — process name is available here
-    void preAppSpecialize(AppSpecializeArgs* args) override {
-        if (!args || !args->app_data_dir) {
-            api->setOption(zygisk::DLCLOSE_MODULE_LIBRARY);
-            return;
-        }
-        // Only act on CODM Garena — unload ourselves from everything else
-        if (!isGame(env, args->app_data_dir)) {
-            api->setOption(zygisk::DLCLOSE_MODULE_LIBRARY);
-        }
-    }
-
-    // Called after specialization — process is now the target app
-    void postAppSpecialize(const AppSpecializeArgs* args) override {
-        if (!enable_hack) return;   // isGame() sets enable_hack = 1
-        spawn_once();
-    }
-
-private:
-    Api*    api = nullptr;
-    JNIEnv* env = nullptr;
-};
-
-REGISTER_ZYGISK_MODULE(CODMModule)
+    LOGI("[ENI] JNI_OnLoad: injector confirmed (key=1337)");
+    spawn_once();   // no-op if constructor already ran; safe fallback if it didn't
+    return JNI_VERSION_1_6;
+}
