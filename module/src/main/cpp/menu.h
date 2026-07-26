@@ -65,14 +65,14 @@ void RenderESP(int screenW, int screenH) {
         auto headSc = WorldToScreen(Transform_GetPos(head));
         auto rootSc = WorldToScreen(Transform_GetPos(mesh));
 
-        if (headSc.z <= 0 || rootSc.z <= 0) continue;
+        if (headSc.Z <= 0 || rootSc.Z <= 0) continue;
 
         // Screen coords (Unity Y axis flip)
-        float hx = headSc.x, hy = screenH - headSc.y;
-        float rx = rootSc.x, ry = screenH - rootSc.y;
+        float hx = headSc.X, hy = screenH - headSc.Y;
+        float rx = rootSc.X, ry = screenH - rootSc.Y;
         float height = std::abs(ry - hy);
         float width  = height * 0.45f;
-        float dist   = headSc.z;
+        float dist   = headSc.Z;
 
         // Distance color fade
         ImVec4 espColor = {1.0f, 0.2f, 0.2f, 1.0f};
@@ -124,7 +124,23 @@ void DrawMenu() {
     static bool showMenu = true;
 
     // Toggle menu dengan button invisible di pojok
-    if (IsKeyPressed(ImGuiKey_VolumeUp)) showMenu = !showMenu;
+    // Toggle: triple-tap the top-left 60×60 px corner within 0.5 s.
+    // ImGuiKey_VolumeUp does not exist in this ImGui version and
+    // AKEYCODE_VOLUME_UP is not mapped by imgui_impl_android.cpp.
+    {
+        static int  _tapCount   = 0;
+        static float _lastTapT  = 0.f;
+        if (IsMouseClicked(0)) {
+            const ImVec2& mp = GetIO().MousePos;
+            if (mp.x < 60.f && mp.y < 60.f) {
+                float now = (float)GetTime();
+                if (now - _lastTapT < 0.5f) _tapCount++;
+                else                         _tapCount = 1;
+                _lastTapT = now;
+                if (_tapCount >= 3) { showMenu = !showMenu; _tapCount = 0; }
+            }
+        }
+    }
     if (!showMenu) return;
 
     SetNextWindowSize(ImVec2(320, 480), ImGuiCond_FirstUseEver);
@@ -258,7 +274,7 @@ EGLBoolean hook_eglSwapBuffers(EGLDisplay dpy, EGLSurface surface) {
 
     EndFrame();
     Render();
-    glViewport(0, 0, (int)io.DisplaySize.x, (int)io.DisplaySize.y);
+    glViewport(0, 0, (int)io.DisplaySize.X, (int)io.DisplaySize.Y);
     ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
 
     return old_eglSwapBuffers(dpy, surface);
