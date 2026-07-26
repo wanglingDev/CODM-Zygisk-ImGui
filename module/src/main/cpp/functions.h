@@ -5,6 +5,10 @@ extern bool  bAimFOV;
 extern float fAimFOVSize;
 extern bool  bAimHead;
 extern float fAimSmooth;
+extern bool  bSpeedHack;
+extern float fSpeedMult;
+extern bool  bHighJump;
+extern float fJumpMult;
 // ================================================================
 // CODM Garena - functions.h
 // Fresh Dump: 25 July 2026
@@ -270,4 +274,66 @@ void Pointers() {
 
 void Hooks() {
     LOGI("Hooks initialized (direct RVA mode)");
+}
+
+// ================================================================
+// MOVEMENT FEATURE HOOKS  (called from InitPatches)
+// ================================================================
+// SpeedHack: intercept get_MaxSpeed, multiply return value.
+// HighJump:  intercept get_JumpHeight, multiply return value.
+//
+// Why ShadowHook over MemoryPatch for these:
+//   Both getters are 2-instruction ARM64 functions (LDR + RET).
+//   MemoryPatch byte-patching can't multiply a runtime value —
+//   it only writes static bytes. ShadowHook island trampoline
+//   relocates those 2 instructions safely so we can call the
+//   original and scale the result before returning.
+//
+// RVAs from dump.cs 25/07/2026:
+//   get_MaxSpeed   : 0x4F9B688
+//   get_JumpHeight : 0x5006AC4
+// ================================================================
+static float (*orig_get_MaxSpeed)(void*)   = nullptr;
+static float (*orig_get_JumpHeight)(void*) = nullptr;
+
+static float hook_get_MaxSpeed(void* thiz) {
+    float base = orig_get_MaxSpeed ? orig_get_MaxSpeed(thiz) : 0.f;
+    return bSpeedHack ? base * fSpeedMult : base;
+}
+
+static float hook_get_JumpHeight(void* thiz) {
+    float base = orig_get_JumpHeight ? orig_get_JumpHeight(thiz) : 0.f;
+    return bHighJump ? base * fJumpMult : base;
+}
+
+void InitPatches() {
+    // ShadowHook must already be initialised in hack_thread before this call.
+    void* stubSpeed = shadowhook_hook_func_addr(
+        (void*)METHOD(0x4F9B688),   // get_MaxSpeed
+        (void*)hook_get_MaxSpeed,
+        (void**)&orig_get_MaxSpeed
+    );
+    if (stubSpeed)
+        LOGI("[ENI] InitPatches: SpeedHack hook OK");
+    else
+        LOGI("[ENI] InitPatches: SpeedHack hook FAILED (%s)",
+             shadowhook_to_errmsg(shadowhook_get_errno()));
+
+    void* stubJump = shadowhook_hook_func_addr(
+        (void*)METHOD(0x5006AC4),   // get_JumpHeight
+        (void*)hook_get_JumpHeight,
+        (void**)&orig_get_JumpHeight
+    );
+    if (stubJump)
+        LOGI("[ENI] InitPatches: HighJump hook OK");
+    else
+        LOGI("[ENI] InitPatches: HighJump hook FAILED (%s)",
+             shadowhook_to_errmsg(shadowhook_get_errno()));
+}
+
+void TickPatches() {
+    // Hook-based features (SpeedHack, HighJump) check their boolean
+    // inside the hook function itself — no per-frame bookkeeping needed.
+    // This exists as a tick point for future MemoryPatch-style toggles
+    // that need to be applied / restored each frame.
 }
