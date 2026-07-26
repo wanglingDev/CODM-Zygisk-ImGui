@@ -1,4 +1,16 @@
 #pragma once
+#include <android/log.h>
+#include <dlfcn.h>
+#include <unistd.h>
+#include <cstring>
+#include <cstdlib>
+#include <cinttypes>
+#include "shadowhook.h"
+
+#ifndef LOGI
+#define LOGI(...) __android_log_print(ANDROID_LOG_INFO,  "zyCheats", __VA_ARGS__)
+#define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, "zyCheats", __VA_ARGS__)
+#endif
 // ═══════════════════════════════════════════════════════════════════
 //  bypass_anogs.h — Tencent AnoSDK (libanogs.so) bypass
 //  Target: CODM Garena arm64-v8a
@@ -10,11 +22,7 @@
 //  File ini hook exported symbols AnoSDK untuk block reporting.
 // ═══════════════════════════════════════════════════════════════════
 
-#include <dlfcn.h>
-#include <cstring>
-#include <cstdlib>
-#include <cinttypes>
-#include "Misc.h"
+
 
 // ── Toggle: nyalain sebelum masuk match, matiin saat di lobby ─────
 // Ini yang dimaksud "toggleable lobby bypass" di komunitas.
