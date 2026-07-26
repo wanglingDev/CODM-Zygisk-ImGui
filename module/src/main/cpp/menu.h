@@ -1,3 +1,4 @@
+#include <cinttypes>
 #pragma once
 // ================================================================
 // CODM Garena - ImGui Menu
@@ -241,21 +242,15 @@ EGLBoolean hook_eglSwapBuffers(EGLDisplay dpy, EGLSurface surface) {
     ImGuiIO& io = GetIO();
     io.DisplaySize = ImVec2((float)glWidth, (float)glHeight);
 
-    // ── Manual frame timing ───────────────────────────────────────────────────
-    // ImGui_ImplAndroid_NewFrame() is the right call here, but it requires
-    // ImGui_ImplAndroid_Init(ANativeWindow*) to have been called first — and
-    // inside an EGL hook we have no ANativeWindow handle.
-    // Instead, drive io.DeltaTime ourselves with CLOCK_MONOTONIC, which is
-    // exactly what the Android backend does internally.
+    // Manual DeltaTime — ImGui_ImplAndroid_NewFrame() needs ANativeWindow
+    // which we don't have inside an EGL hook. clock_gettime does the same job.
     {
-        static double s_lastTime = 0.0;
+        static double _t = 0.0;
         struct timespec ts;
         clock_gettime(CLOCK_MONOTONIC, &ts);
-        double now = (double)ts.tv_sec + (double)ts.tv_nsec * 1e-9;
-        io.DeltaTime = (s_lastTime > 0.0)
-                       ? (float)(now - s_lastTime)
-                       : (1.0f / 60.0f);      // sane default on first frame
-        s_lastTime   = now;
+        double now = (double)ts.tv_sec + ts.tv_nsec * 1e-9;
+        GetIO().DeltaTime = (_t > 0.0) ? (float)(now - _t) : 1.f/60.f;
+        _t = now;
     }
 
     ImGui_ImplOpenGL3_NewFrame();

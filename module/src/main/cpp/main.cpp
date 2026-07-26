@@ -4,49 +4,37 @@
 #include <jni.h>
 #include "hook.h"
 
-// Guard against the constructor + JNI_OnLoad both spawning hack_thread.
-// When AndKittyInjector dlopen()s the .so, __attribute__((constructor)) fires
-// first (synchronously, inside dlopen), then JNI_OnLoad is called.
-// Without the guard, DobbyHook is called twice on the same address →
-// the trampoline is overwritten → hack_thread crashes silently before
-// eglSwapBuffers is hooked → no menu, no ESP, nothing.
-static std::atomic<bool> s_thread_started{false};
+static std::atomic<bool> s_started{false};
 
-static void spawn_hack_thread() {
-    // exchange returns the OLD value; if it was already true, bail out.
-    if (s_thread_started.exchange(true)) {
-        LOGI("spawn_hack_thread: already started, skipping duplicate spawn");
+static void spawn_once() {
+    if (s_started.exchange(true)) {
+        LOGI("[ENI] spawn_once: thread already running, skipping");
         return;
     }
     pthread_t ntid;
     int ret = pthread_create(&ntid, nullptr, hack_thread, nullptr);
     if (ret != 0) {
-        LOGE("spawn_hack_thread: pthread_create failed: %s", strerror(ret));
-        s_thread_started.store(false); // allow retry
+        LOGE("[ENI] pthread_create FAILED: %s", strerror(ret));
+        s_started.store(false);
     } else {
-        LOGI("spawn_hack_thread: hack_thread spawned OK");
+        LOGI("[ENI] hack_thread spawned OK");
         pthread_detach(ntid);
     }
 }
 
-// ── Entry Point 1: constructor ────────────────────────────────────────────────
-// Fires automatically on dlopen() — before JNI_OnLoad is invoked.
+// Fires on dlopen() — before JNI_OnLoad
 __attribute__((constructor)) void lib_main() {
-    spawn_hack_thread();
+    LOGI("[ENI] constructor fired");
+    spawn_once();
 }
 
-// ── Entry Point 2: JNI_OnLoad ─────────────────────────────────────────────────
-// Called by AndKittyInjector after dlopen(); key == 1337 means injector call.
-// The constructor already fired → thread is already running.
-// We do NOT spawn again — just return the correct JNI version.
+// Called by AndKittyInjector after dlopen()
 extern "C" jint JNIEXPORT JNI_OnLoad(JavaVM* vm, void* key) {
     if (key != (void*)1337) {
-        LOGI("JNI_OnLoad: not from injector, skipping");
+        LOGI("[ENI] JNI_OnLoad: not injector call, skip");
         return JNI_VERSION_1_6;
     }
-    LOGI("JNI_OnLoad: injector call confirmed — constructor already spawned thread");
-    // spawn_hack_thread() is safe to call again; the atomic guard prevents
-    // a second thread from actually starting.
-    spawn_hack_thread();
+    LOGI("[ENI] JNI_OnLoad: injector confirmed (key=1337)");
+    spawn_once();   // no-op if constructor already ran; safe fallback if it didn't
     return JNI_VERSION_1_6;
 }

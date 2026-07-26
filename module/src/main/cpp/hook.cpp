@@ -82,72 +82,86 @@ HOOKAF(int32_t, Consume, void *thiz, void *arg1, bool arg2, long arg3, uint32_t 
 #include "menu.h"
 
 void *hack_thread(void *arg) {
+    LOGI("[ENI] hack_thread: started, waiting for libil2cpp.so...");
+
+    // Wait up to 60 s for the game to load libil2cpp.so
+    int wait_iters = 0;
     do {
         sleep(1);
-        // FIXED: was "libunity.so" — all RVAs in functions.h are offsets within
-        // libil2cpp.so (confirmed from dump.cs). libunity.so has a completely
-        // different base; every METHOD(rva) call would land at a wrong address.
         g_il2cppBaseMap = KittyMemory::getLibraryBaseMap("libil2cpp.so");
-    } while (!g_il2cppBaseMap.isValid());
-    KITTY_LOGI("il2cpp base: %p", (void*)(g_il2cppBaseMap.startAddress));
+        if (++wait_iters % 5 == 0)
+            LOGI("[ENI] hack_thread: still waiting for il2cpp (%ds)...", wait_iters);
+    } while (!g_il2cppBaseMap.isValid() && wait_iters < 60);
+
+    if (!g_il2cppBaseMap.isValid()) {
+        LOGE("[ENI] hack_thread: libil2cpp.so not found after 60 s — aborting");
+        return nullptr;
+    }
+
+    LOGI("[ENI] il2cpp base: %p", (void*)g_il2cppBaseMap.startAddress);
     Pointers();
     Hooks();
 
-    // Hook eglSwapBuffers: coba libEGL.so dulu (paling reliable),
-    // fallback ke libunity.so kalau gagal.
+    // ── eglSwapBuffers ────────────────────────────────────────────────────────
     void* eglSwapBuffers = nullptr;
 
     auto eglhandle = dlopen("libEGL.so", RTLD_LAZY);
     if (eglhandle) {
         eglSwapBuffers = dlsym(eglhandle, "eglSwapBuffers");
-        if (eglSwapBuffers) LOGI("eglSwapBuffers found in libEGL.so");
+        if (eglSwapBuffers)
+            LOGI("[ENI] eglSwapBuffers found in libEGL.so @ %p", eglSwapBuffers);
+        else
+            LOGI("[ENI] libEGL.so opened but eglSwapBuffers symbol missing");
+    } else {
+        LOGE("[ENI] dlopen(libEGL.so) failed: %s", dlerror());
     }
 
     if (!eglSwapBuffers) {
         auto unityhandle = dlopen("libunity.so", RTLD_LAZY);
         if (unityhandle) {
             eglSwapBuffers = dlsym(unityhandle, "eglSwapBuffers");
-            if (eglSwapBuffers) LOGI("eglSwapBuffers found in libunity.so (fallback)");
+            if (eglSwapBuffers)
+                LOGI("[ENI] eglSwapBuffers found in libunity.so (fallback) @ %p", eglSwapBuffers);
         }
     }
 
     if (eglSwapBuffers) {
-        DobbyHook((void*)eglSwapBuffers, (void*)hook_eglSwapBuffers,
-                  (void**)&old_eglSwapBuffers);
-        LOGI("eglSwapBuffers hooked!");
+        int dret = DobbyHook((void*)eglSwapBuffers, (void*)hook_eglSwapBuffers,
+                             (void**)&old_eglSwapBuffers);
+        if (dret == 0)
+            LOGI("[ENI] eglSwapBuffers hooked successfully!");
+        else
+            LOGE("[ENI] DobbyHook(eglSwapBuffers) FAILED, ret=%d", dret);
     } else {
-        LOGI("eglSwapBuffers not found anywhere — device may use Vulkan");
+        LOGE("[ENI] eglSwapBuffers NOT FOUND — game may use Vulkan. Menu will not render.");
+        LOGE("[ENI] Run: adb shell setprop debug.hwui.renderer opengl  and restart game");
     }
 
-    // BUG 2 FIX: /system/lib/ is 32-bit only. arm64 system libs live in
-    // /system/lib64/. On arm64 the old path returns NULL silently.
-    // BUG 3 FIX: the original code passed NULL to DobbyHook when sym_input
-    // was NULL (second resolver was inside the else-branch of the first NULL
-    // check — so consume was never hooked AND if initializeMotionEvent was
-    // NULL, DobbyHook(NULL) would crash the thread before eglSwapBuffers
-    // even got installed. Both symbols now guarded independently.
+    // ── Input hooks ──────────────────────────────────────────────────────────
 #ifdef __aarch64__
     #define LIBINPUT_PATH "/system/lib64/libinput.so"
 #else
     #define LIBINPUT_PATH "/system/lib/libinput.so"
 #endif
 
-    void *sym_input = DobbySymbolResolver((LIBINPUT_PATH),
-        ("_ZN7android13InputConsumer21initializeMotionEventEPNS_11MotionEventEPKNS_12InputMessageE"));
+    void *sym_input = DobbySymbolResolver(LIBINPUT_PATH,
+        "_ZN7android13InputConsumer21initializeMotionEventEPNS_11MotionEventEPKNS_12InputMessageE");
     if (sym_input) {
-        DobbyHook(sym_input,(void*)myInput,(void**)&origInput);
+        int r = DobbyHook(sym_input, (void*)myInput, (void**)&origInput);
+        LOGI("[ENI] initializeMotionEvent hook: %s", r==0?"OK":"FAILED");
     } else {
-        LOGI("initializeMotionEvent symbol not found at %s", LIBINPUT_PATH);
+        LOGI("[ENI] initializeMotionEvent not found in %s (non-fatal)", LIBINPUT_PATH);
     }
 
-    sym_input = DobbySymbolResolver((LIBINPUT_PATH),
-        ("_ZN7android13InputConsumer7consumeEPNS_26InputEventFactoryInterfaceEblPjPPNS_10InputEventE"));
+    sym_input = DobbySymbolResolver(LIBINPUT_PATH,
+        "_ZN7android13InputConsumer7consumeEPNS_26InputEventFactoryInterfaceEblPjPPNS_10InputEventE");
     if (sym_input) {
-        DobbyHook(sym_input,(void*)myConsume,(void**)&origConsume);
+        int r = DobbyHook(sym_input, (void*)myConsume, (void**)&origConsume);
+        LOGI("[ENI] consume hook: %s", r==0?"OK":"FAILED");
     } else {
-        LOGI("consume symbol not found — touch passthrough disabled, volume-key toggle still works");
+        LOGI("[ENI] consume not found in %s (non-fatal)", LIBINPUT_PATH);
     }
 
-    LOGI("Draw Done!");
+    LOGI("[ENI] hack_thread: setup complete!");
     return nullptr;
 }
