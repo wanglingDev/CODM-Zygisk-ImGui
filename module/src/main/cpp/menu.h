@@ -239,41 +239,5 @@ void SetupImgui() {
     io.Fonts->AddFontFromMemoryTTF(Roboto_Regular, 30, 14.0f * scale);
 }
 
-// ================================================================
-// EGL SWAP BUFFERS HOOK
-// ================================================================
-EGLBoolean (*old_eglSwapBuffers)(EGLDisplay dpy, EGLSurface surface);
-EGLBoolean hook_eglSwapBuffers(EGLDisplay dpy, EGLSurface surface) {
-    eglQuerySurface(dpy, surface, EGL_WIDTH,  &glWidth);
-    eglQuerySurface(dpy, surface, EGL_HEIGHT, &glHeight);
 
-    if (!setupimg) {
-        SetupImgui();
-        setupimg = true;
-    }
-
-    ImGuiIO& io = GetIO();
-    io.DisplaySize = ImVec2((float)glWidth, (float)glHeight);
-
-    ImGui_ImplOpenGL3_NewFrame();
-    NewFrame();
-
-    // Draw ESP (background layer)
-    RenderESP(glWidth, glHeight);
-
-    // Draw Menu (foreground)
-    DrawMenu();
-
-    // Aimbot
-    if (bAimbot && g_base) {
-        auto target = GetAimbotTarget(glWidth, glHeight);
-        if (target) DoAimbot(target);
-    }
-
-    EndFrame();
-    Render();
-    glViewport(0, 0, (int)io.DisplaySize.x, (int)io.DisplaySize.y);
-    ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
-
-    return old_eglSwapBuffers(dpy, surface);
-}
+// EGL + Vulkan hooks live in hook.cpp — not redefined here.
