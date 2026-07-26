@@ -1,4 +1,10 @@
 #pragma once
+
+// Forward declarations — defined in menu.h (included after this file in hook.cpp)
+extern bool  bAimFOV;
+extern float fAimFOVSize;
+extern bool  bAimHead;
+extern float fAimSmooth;
 // ================================================================
 // CODM Garena - functions.h
 // Fresh Dump: 25 July 2026
