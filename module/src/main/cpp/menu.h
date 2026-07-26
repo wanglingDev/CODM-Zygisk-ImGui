@@ -154,13 +154,13 @@ void RenderESP(int W,int H){
 
         auto headSc = WorldToScreen(Transform_GetPos(head));
         auto rootSc = WorldToScreen(Transform_GetPos(mesh));
-        if (headSc.z<=0||rootSc.z<=0) continue;
+        if (headSc.Z<=0||rootSc.Z<=0) continue;
 
-        float hx = headSc.x, hy = (float)H - headSc.y;
-        float rx = rootSc.x, ry = (float)H - rootSc.y;
+        float hx = headSc.X, hy = (float)H - headSc.Y;
+        float rx = rootSc.X, ry = (float)H - rootSc.Y;
         float height = std::fabs(ry-hy);
         float width  = height*0.45f;
-        float dist   = headSc.z;
+        float dist   = headSc.Z;
 
         // Box fill (subtle)
         if (bBoxFill)
@@ -408,9 +408,12 @@ void DrawMenu(){
             SetNextItemWidth(-1);
             SliderFloat("##fr",&fFireMult,0.5f,3.0f,"Fire Rate x%.1f");
             if (Button("Apply Fire Rate", {-1,0})){
-                // Write fire speed multiplier to local pawn's weapon
+                // Inline fire speed write — no external helper needed
                 auto local = GetLocalPawn();
-                if (local && g_base) Weapon_setFireSpeed((void*)local, fFireMult);
+                if (local && g_base) {
+                    float* fireSpeedField = (float*)((uint8_t*)local + 0x220);
+                    *fireSpeedField = (*fireSpeedField) * fFireMult;
+                }
             }
 
             Spacing(); SeparatorText(" Ammo ");
