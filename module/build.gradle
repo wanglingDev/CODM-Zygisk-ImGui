@@ -25,7 +25,7 @@ android {
     externalNativeBuild {
         cmake {
             path "src/main/cpp/CMakeLists.txt"
-            version "3.18.1"
+            version "3.31.5"
         }
     }
     buildTypes{
@@ -98,20 +98,20 @@ afterEvaluate {
             // which throws NullPointerException during project configuration.
             // Resolve ADB safely: fall back to PATH lookup so the task is always
             // registered (even if ADB is absent), and fail at execution time instead.
-            def adb = android.adbExecutable ?: 'adb'
+            def adb = 'adb'; try { if (android.adbExecutable) adb = android.adbExecutable.toString() } catch(e) {}
             commandLine adb, "push", zipName, "/data/local/tmp/"
         }
 
         task("flash${variantCapped}", type: Exec) {
             dependsOn("push${variantCapped}")
-            def adb = android.adbExecutable ?: 'adb'
+            def adb = 'adb'; try { if (android.adbExecutable) adb = android.adbExecutable.toString() } catch(e) {}
             commandLine adb, "shell", "su", "-c",
                     "magisk --install-module /data/local/tmp/${zipName}"
         }
 
         task("flashAndReboot${variantCapped}", type: Exec) {
             dependsOn("flash${variantCapped}")
-            def adb = android.adbExecutable ?: 'adb'
+            def adb = 'adb'; try { if (android.adbExecutable) adb = android.adbExecutable.toString() } catch(e) {}
             commandLine adb, "shell", "reboot"
         }
 

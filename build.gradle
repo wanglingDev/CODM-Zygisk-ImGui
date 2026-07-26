@@ -1,120 +1,35 @@
-import org.apache.tools.ant.filters.FixCrLfFilter
-
-import java.nio.file.Paths
-import java.nio.file.Files
-
-apply plugin: 'com.android.library'
-apply from: file(rootProject.file('module.gradle'))
-
-android {
-    compileSdkVersion rootProject.ext.targetSdkVersion
-    defaultConfig {
-        minSdkVersion rootProject.ext.minSdkVersion
-        targetSdkVersion rootProject.ext.targetSdkVersion
-        externalNativeBuild {
-            cmake {
-                arguments "-DMODULE_NAME:STRING=$moduleLibraryName"
-                // DELETE THIS IF NOT DEBUG BUILD
-                // cppFlags += "-DBIGSEX"
-            }
-        }
+buildscript {
+    repositories {
+        mavenCentral()
+        google()
     }
-    buildFeatures {
-        prefab true
-    }
-    externalNativeBuild {
-        cmake {
-            path "src/main/cpp/CMakeLists.txt"
-            version "3.31.5"
-        }
-    }
-    buildTypes{
-        release {
-            minifyEnabled true
-        }
+    dependencies {
+        classpath 'com.android.tools.build:gradle:7.4.2'
     }
 }
 
-repositories {
-    mavenLocal()
+apply plugin: 'idea'
+
+idea.module {
+    excludeDirs += file('out')
+    resourceDirs += file('template')
+    resourceDirs += file('scripts')
 }
 
-afterEvaluate {
-    android.libraryVariants.forEach { variant ->
-        def variantCapped = variant.name.capitalize()
-        def variantLowered = variant.name.toLowerCase()
-
-        def zipName = "${magiskModuleId.replace('_', '-')}-${moduleVersion}-${variantLowered}.zip"
-        def magiskDir = file("$outDir/magisk_module_$variantLowered")
-
-        task("prepareMagiskFiles${variantCapped}", type: Sync) {
-            dependsOn("assemble$variantCapped")
-
-            def templatePath = "$rootDir/template/magisk_module"
-
-            into magiskDir
-            from(templatePath) {
-                exclude 'module.prop'
-            }
-            from(templatePath) {
-                include 'module.prop'
-                expand([
-                        id         : magiskModuleId,
-                        name       : moduleName,
-                        version    : moduleVersion,
-                        versionCode: moduleVersionCode.toString(),
-                        author     : moduleAuthor,
-                        description: moduleDescription,
-                ])
-                filter(FixCrLfFilter.class,
-                        eol: FixCrLfFilter.CrLf.newInstance("lf"))
-            }
-            from("$buildDir/intermediates/stripped_native_libs/$variantLowered/out/lib") {
-                into 'lib'
-            }
-            doLast {
-                file("$magiskDir/zygisk").mkdir()
-                fileTree("$magiskDir/lib").visit { f ->
-                    if (!f.directory) return
-                    def srcPath = Paths.get("${f.file.absolutePath}/lib${moduleLibraryName}.so")
-                    def dstPath = Paths.get("$magiskDir/zygisk/${f.path}.so")
-                    Files.move(srcPath, dstPath)
-                }
-                new File("$magiskDir/lib").deleteDir()
-            }
-        }
-
-        task("zip${variantCapped}", type: Zip) {
-            dependsOn("prepareMagiskFiles${variantCapped}")
-            from magiskDir
-            archiveName zipName
-            destinationDir outDir
-        }
-
-        task("push${variantCapped}", type: Exec) {
-            dependsOn("zip${variantCapped}")
-            workingDir outDir
-            // android.adbExecutable is null when SDK platform-tools aren't found,
-            // which throws NullPointerException during project configuration.
-            // Resolve ADB safely: fall back to PATH lookup so the task is always
-            // registered (even if ADB is absent), and fail at execution time instead.
-            def adb = 'adb'; try { if (android.adbExecutable) adb = android.adbExecutable.toString() } catch(e) {}
-            commandLine adb, "push", zipName, "/data/local/tmp/"
-        }
-
-        task("flash${variantCapped}", type: Exec) {
-            dependsOn("push${variantCapped}")
-            def adb = 'adb'; try { if (android.adbExecutable) adb = android.adbExecutable.toString() } catch(e) {}
-            commandLine adb, "shell", "su", "-c",
-                    "magisk --install-module /data/local/tmp/${zipName}"
-        }
-
-        task("flashAndReboot${variantCapped}", type: Exec) {
-            dependsOn("flash${variantCapped}")
-            def adb = 'adb'; try { if (android.adbExecutable) adb = android.adbExecutable.toString() } catch(e) {}
-            commandLine adb, "shell", "reboot"
-        }
-
-        variant.assembleProvider.get().finalizedBy("zip${variantCapped}")
+allprojects {
+    repositories {
+        mavenCentral()
+        google()
     }
+}
+
+ext {
+    minSdkVersion = 23
+    targetSdkVersion = 30
+
+    outDir = file("$rootDir/out")
+}
+
+task clean(type: Delete) {
+    delete rootProject.buildDir, outDir
 }
