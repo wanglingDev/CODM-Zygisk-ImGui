@@ -321,8 +321,8 @@ void *hack_thread(void *arg) {
     }
 
     if (eglSwap) {
-        void* stub = SHHook(eglSwap, hook_eglSwapBuffers, &old_eglSwapBuffers);
-        LOGI("[ENI] eglSwapBuffers ShadowHook: %s", stub ? "OK" : "FAILED");
+        int _egl_r = SHHook(eglSwap, hook_eglSwapBuffers, &old_eglSwapBuffers);
+        LOGI("[ENI] eglSwapBuffers hook: %s", _egl_r == 0 ? "OK" : "FAILED");
     } else {
         LOGE("[ENI] eglSwapBuffers not found — Vulkan device?");
         LOGE("[ENI] Try: adb shell setprop debug.hwui.renderer opengl");
