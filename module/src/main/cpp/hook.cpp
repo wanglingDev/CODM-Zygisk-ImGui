@@ -243,10 +243,11 @@ HOOKAF(void, Input, void *thiz, void *ex_ab, void *ex_ac) {
 
 HOOKAF(int32_t, Consume, void *thiz, void *arg1, bool arg2, long arg3,
        uint32_t *arg4, AInputEvent **input_event) {
-    auto result = origConsume(thiz, arg1, arg2, arg3, arg4, input_event);
-    if (result != 0 || *input_event == nullptr) return result;
-    ImGui_ImplAndroid_HandleInputEvent(*input_event);
-    return result;
+    // Forward ke ImGui SEBELUM game consume — koordinat masih raw
+    if (input_event && *input_event) {
+        ImGui_ImplAndroid_HandleInputEvent(*input_event);
+    }
+    return origConsume(thiz, arg1, arg2, arg3, arg4, input_event);
 }
 
 #include "functions.h"
