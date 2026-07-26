@@ -188,9 +188,10 @@ static bool NeonToggle_retval(const char* label, bool* v, ImVec4 onColor = {0.f,
 //  MAIN MENU DRAW
 // ════════════════════════════════════════════════════════════════
 static void DrawMenu() {
-    static bool showMenu = true;
-    static float logoX  = sw * 0.82f;
-    static float logoY  = sh * 0.06f;
+    static bool  showMenu = true;
+    static float logoX   = -1.f;  // -1 = unset, positioned on first frame
+    static float logoY   = -1.f;
+    if (logoX < 0) { logoX = sw * 0.82f; logoY = sh * 0.06f; }
 
     // Hardware menu button toggle
     if (ImGui::IsKeyPressed(ImGuiKey_Menu)) showMenu = !showMenu;
