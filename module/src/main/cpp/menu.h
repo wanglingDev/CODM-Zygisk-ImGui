@@ -69,6 +69,8 @@ bool  bShowDebug    = false;
 //  EGL HOOK STATE
 // ════════════════════════════════════════════════════════════════
 extern EGLBoolean (*orig_eglSwapBuffers)(EGLDisplay, EGLSurface);
+// Backward-compat alias — some hook.cpp versions still reference old_eglSwapBuffers
+#define old_eglSwapBuffers orig_eglSwapBuffers
 static bool        g_imgui_init = false;
 static int         g_width = 0, g_height = 0;
 
@@ -131,6 +133,13 @@ static void NeonToggle(const char* label, bool* v, ImVec4 onColor={0.f,1.f,1.f,1
     ImGui::Checkbox(label, v);
     if (*v) ImGui::PopStyleColor();
 }
+
+// ════════════════════════════════════════════════════════════════
+//  RENDER STATE  (declared here — DrawMenu references g_frame_count)
+// ════════════════════════════════════════════════════════════════
+static int             g_frame_count  = 0;
+static pthread_mutex_t g_render_mutex = PTHREAD_MUTEX_INITIALIZER;
+static pthread_t       g_render_tid   = 0;
 
 // ════════════════════════════════════════════════════════════════
 //  RADAR DRAW
@@ -543,10 +552,6 @@ static void DrawMenu() {
 // ════════════════════════════════════════════════════════════════
 //  EGL SWAP HOOK
 // ════════════════════════════════════════════════════════════════
-static int             g_frame_count  = 0;
-static pthread_mutex_t g_render_mutex = PTHREAD_MUTEX_INITIALIZER;
-static pthread_t       g_render_tid   = 0;
-
 EGLBoolean hook_eglSwapBuffers(EGLDisplay display, EGLSurface surface) {
     pthread_t self = pthread_self();
     if (g_render_tid == 0) g_render_tid = self;
