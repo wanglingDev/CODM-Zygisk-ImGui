@@ -1,5 +1,6 @@
 #pragma once
 #include <cinttypes>
+#include <pthread.h>
 #include <cmath>
 #include <EGL/egl.h>
 #include <GLES2/gl2.h>
@@ -186,80 +187,20 @@ static bool NeonToggle_retval(const char* label, bool* v, ImVec4 onColor = {0.f,
 
 // ════════════════════════════════════════════════════════════════
 //  MAIN MENU DRAW
+//  Plain draggable window — no floating icon.
+//  Toggle: hardware Menu key, or tap the window's [X] close button.
+//  Re-open after close: re-inject or add a keybind below.
 // ════════════════════════════════════════════════════════════════
 static void DrawMenu() {
-    static bool  showMenu = true;
-    static float logoX   = -1.f;
-    static float logoY   = -1.f;
+    static bool showMenu = true;
 
-    // Hardware menu button toggle
+    // Hardware menu button toggles visibility
     if (ImGui::IsKeyPressed(ImGuiKey_Menu)) showMenu = !showMenu;
-
-    // ── Persistent logo button (always visible) ───────────────────
-    // Rendered before the !showMenu guard so it stays on screen
-    // even when the main menu is closed.
-    {
-        ImGui::SetNextWindowPos({ logoX, logoY }, ImGuiCond_Always);
-        ImGui::SetNextWindowSize({ 58.f, 58.f }, ImGuiCond_Always);
-        ImGui::SetNextWindowBgAlpha(0.82f);
-        ImGuiWindowFlags lf =
-            ImGuiWindowFlags_NoTitleBar    | ImGuiWindowFlags_NoScrollbar |
-            ImGuiWindowFlags_NoResize      | ImGuiWindowFlags_NoDecoration |
-            ImGuiWindowFlags_NoSavedSettings;
-
-        ImGui::PushStyleColor(ImGuiCol_WindowBg,
-            showMenu ? ImVec4(0.f,0.55f,0.7f,0.85f)   // cyan when open
-                     : ImVec4(0.05f,0.05f,0.1f,0.82f)); // dark when closed
-        ImGui::PushStyleColor(ImGuiCol_Border,
-            ImVec4(0.f, 1.f, 1.f, showMenu ? 0.9f : 0.35f));
-        ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 12.f);
-        ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 1.5f);
-
-        ImGui::Begin("##logo_btn", nullptr, lf);
-
-        // Make whole window draggable + clickable
-        ImGui::SetCursorPos({ 4.f, 4.f });
-        ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(0,0,0,0));
-        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.f,1.f,1.f,0.15f));
-        ImGui::PushStyleColor(ImGuiCol_ButtonActive,  ImVec4(0.f,1.f,1.f,0.35f));
-        ImGui::PushStyleColor(ImGuiCol_Text,          ImVec4(0.f,1.f,1.f,1.f));
-
-        bool clicked = ImGui::Button(showMenu ? "  ✕  \n★ENI" : " ★ENI \n MENU",
-                                     { 50.f, 50.f });
-
-        ImGui::PopStyleColor(4);
-        ImGui::End();
-
-        ImGui::PopStyleVar(2);
-        ImGui::PopStyleColor(2);
-
-        // Dragging support — move logo around screen
-        if (ImGui::IsItemHovered()) {
-            ImVec2 drag = ImGui::GetMouseDragDelta(0, 2.f);
-            if (drag.x != 0 || drag.y != 0) {
-                logoX += drag.x; logoY += drag.y;
-                ImGui::ResetMouseDragDelta(0);
-                clicked = false; // drag, not click
-            }
-        }
-
-        if (clicked) {
-            showMenu = !showMenu;
-            // STUCK MOUSE FIX: when toggling, force-reset MouseDown[0].
-            // Without this, ACTION_UP from the tap is sometimes consumed
-            // by the game before ImGui sees it → io.MouseDown[0] stays true
-            // → every subsequent button appears "held" and won't click.
-            ImGui::GetIO().AddMouseButtonEvent(0, false);
-        }
-    }
-
     if (!showMenu) return;
 
     ImGuiIO& io = ImGui::GetIO();
     float sw = io.DisplaySize.x, sh = io.DisplaySize.y;
-    if (logoX < 0.f) { logoX = sw * 0.82f; logoY = sh * 0.06f; }
 
-    // Anchor: top-left 10% margin, width 55%, height 80%
     ImGui::SetNextWindowPos({ sw * 0.05f, sh * 0.07f }, ImGuiCond_Once);
     ImGui::SetNextWindowSize({ sw * 0.55f, sh * 0.80f }, ImGuiCond_Once);
     ImGui::SetNextWindowBgAlpha(0.92f);
@@ -564,7 +505,21 @@ static void AimbotTick(float sw, float sh) {
 // ════════════════════════════════════════════════════════════════
 //  EGL SWAP HOOK IMPLEMENTATION
 // ════════════════════════════════════════════════════════════════
+static pthread_mutex_t  g_render_mutex = PTHREAD_MUTEX_INITIALIZER;
+static pthread_t        g_render_tid   = 0;
+
 EGLBoolean hook_eglSwapBuffers(EGLDisplay display, EGLSurface surface) {
+    // ── Thread ownership — ImGui is NOT thread-safe ───────────────
+    // Multiple Zygisk forks fire multiple constructors on different
+    // threads. Only the first thread that arrives owns the render loop.
+    pthread_t self = pthread_self();
+    if (g_render_tid == 0) g_render_tid = self;
+    if (g_render_tid != self)
+        return old_eglSwapBuffers ? old_eglSwapBuffers(display, surface) : EGL_TRUE;
+
+    if (pthread_mutex_trylock(&g_render_mutex) != 0)
+        return old_eglSwapBuffers ? old_eglSwapBuffers(display, surface) : EGL_TRUE;
+
     // Get surface dimensions
     eglQuerySurface(display, surface, EGL_WIDTH,  &g_width);
     eglQuerySurface(display, surface, EGL_HEIGHT, &g_height);
@@ -626,6 +581,31 @@ EGLBoolean hook_eglSwapBuffers(EGLDisplay display, EGLSurface surface) {
         (float)g_height / (float)g_screen_h
     };
 
+    // ── GL state save ────────────────────────────────────────────────
+    GLint gl_prog, gl_tex, gl_ab, gl_vab, gl_fbo, gl_vp[4];
+    GLboolean gl_blend, gl_cull, gl_depth, gl_stencil, gl_scissor;
+    glGetIntegerv(GL_CURRENT_PROGRAM,      &gl_prog);
+    glGetIntegerv(GL_TEXTURE_BINDING_2D,   &gl_tex);
+    glGetIntegerv(GL_ARRAY_BUFFER_BINDING, &gl_ab);
+    glGetIntegerv(GL_VERTEX_ARRAY_BINDING, &gl_vab);
+    glGetIntegerv(GL_FRAMEBUFFER_BINDING,  &gl_fbo);
+    glGetIntegerv(GL_VIEWPORT,             gl_vp);
+    gl_blend   = glIsEnabled(GL_BLEND);
+    gl_cull    = glIsEnabled(GL_CULL_FACE);
+    gl_depth   = glIsEnabled(GL_DEPTH_TEST);
+    gl_stencil = glIsEnabled(GL_STENCIL_TEST);
+    gl_scissor = glIsEnabled(GL_SCISSOR_TEST);
+
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glDisable(GL_DEPTH_TEST);
+    glDisable(GL_STENCIL_TEST);
+    glDisable(GL_CULL_FACE);
+    glDisable(GL_SCISSOR_TEST);
+    glEnable(GL_BLEND);
+    glBlendEquation(GL_FUNC_ADD);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    glViewport(0, 0, g_width, g_height);
+
     ImGui_ImplOpenGL3_NewFrame();
     ImGui_ImplAndroid_NewFrame();
     ImGui::NewFrame();
@@ -643,8 +623,20 @@ EGLBoolean hook_eglSwapBuffers(EGLDisplay display, EGLSurface surface) {
     ImGui::Render();
     ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
 
-    // Restore GL state
-    glViewport(0, 0, g_width, g_height);
+    // ── GL state restore ──────────────────────────────────────────
+    glUseProgram(gl_prog);
+    glBindTexture(GL_TEXTURE_2D,      gl_tex);
+    glBindBuffer(GL_ARRAY_BUFFER,     gl_ab);
+    glBindVertexArray(gl_vab);
+    glBindFramebuffer(GL_FRAMEBUFFER, gl_fbo);
+    glViewport(gl_vp[0], gl_vp[1],   gl_vp[2], gl_vp[3]);
+    gl_blend   ? glEnable(GL_BLEND)        : glDisable(GL_BLEND);
+    gl_cull    ? glEnable(GL_CULL_FACE)    : glDisable(GL_CULL_FACE);
+    gl_depth   ? glEnable(GL_DEPTH_TEST)   : glDisable(GL_DEPTH_TEST);
+    gl_stencil ? glEnable(GL_STENCIL_TEST) : glDisable(GL_STENCIL_TEST);
+    gl_scissor ? glEnable(GL_SCISSOR_TEST) : glDisable(GL_SCISSOR_TEST);
 
-    return old_eglSwapBuffers(display, surface);
+    EGLBoolean res = old_eglSwapBuffers ? old_eglSwapBuffers(display, surface) : EGL_TRUE;
+    pthread_mutex_unlock(&g_render_mutex);
+    return res;
 }
