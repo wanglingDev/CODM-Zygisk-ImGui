@@ -295,7 +295,7 @@ static void DrawMenu() {
                 // Weapon skin
                 NeonToggle("Weapon Skin", &bWeaponSkin, {0.f, 1.f, 1.f, 1.f});
                 if (bWeaponSkin) {
-                    ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x * 0.6f);
+                    ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().X * 0.6f);
                     ImGui::InputInt("Weapon ID##ws", &iWeaponSkinID);
                     if (iWeaponSkinID < 0) iWeaponSkinID = 0;
                 }
@@ -305,7 +305,7 @@ static void DrawMenu() {
                 // Operator skin
                 NeonToggle("Operator Skin", &bOperatorSkin, {1.f, 0.f, 1.f, 1.f});
                 if (bOperatorSkin) {
-                    ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x * 0.6f);
+                    ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().X * 0.6f);
                     ImGui::InputInt("Operator ID##os", &iOperatorSkinID);
                     if (iOperatorSkinID < 0) iOperatorSkinID = 0;
                 }
@@ -566,7 +566,9 @@ EGLBoolean hook_eglSwapBuffers(EGLDisplay display, EGLSurface surface) {
         io.Fonts->Build();
 
         ApplyCyberpunkTheme();
-        ImGui_ImplAndroid_Init(nullptr);
+        // ImGui_ImplAndroid_Init(nullptr) REMOVED — passing nullptr crashes
+        // in NewFrame() via ANativeWindow_getWidth(nullptr).
+        // DeltaTime is driven manually below instead.
         ImGui_ImplOpenGL3_Init("#version 100");
 
         g_imgui_init = true;
@@ -614,8 +616,15 @@ EGLBoolean hook_eglSwapBuffers(EGLDisplay display, EGLSurface surface) {
 
     if (dbg) LOGI("[ENI] frame %d: ImplOpenGL3_NewFrame", g_frame_n);
     ImGui_ImplOpenGL3_NewFrame();
-    if (dbg) LOGI("[ENI] frame %d: ImplAndroid_NewFrame", g_frame_n);
-    ImGui_ImplAndroid_NewFrame();
+    // ImGui_ImplAndroid_NewFrame() REMOVED — crashes without valid ANativeWindow.
+    // DeltaTime is set manually (same logic the backend uses internally):
+    {
+        static double _ft = 0.0; struct timespec _ts;
+        clock_gettime(CLOCK_MONOTONIC, &_ts);
+        double _now = (double)_ts.tv_sec + _ts.tv_nsec * 1e-9;
+        ImGui::GetIO().DeltaTime = (_ft > 0.0) ? (float)(_now-_ft) : 1.f/60.f;
+        _ft = _now;
+    }
     if (dbg) LOGI("[ENI] frame %d: ImGui::NewFrame", g_frame_n);
     ImGui::NewFrame();
 

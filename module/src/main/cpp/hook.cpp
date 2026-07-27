@@ -278,7 +278,7 @@ void *hack_thread(void *arg) {
     LOGI("[ENI] hack_thread: scanning for il2cpp...");
 
     static const char* CANDIDATES[] = {
-        "libunity.so", "libil2cpp.so", "libGameAssembly.so", nullptr
+        "libil2cpp.so", "libGameAssembly.so", nullptr
     };
 
     int iters = 0;
