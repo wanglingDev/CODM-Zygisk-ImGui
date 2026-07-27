@@ -295,7 +295,7 @@ static void DrawMenu() {
                 // Weapon skin
                 NeonToggle("Weapon Skin", &bWeaponSkin, {0.f, 1.f, 1.f, 1.f});
                 if (bWeaponSkin) {
-                    ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().X * 0.6f);
+                    ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x * 0.6f);
                     ImGui::InputInt("Weapon ID##ws", &iWeaponSkinID);
                     if (iWeaponSkinID < 0) iWeaponSkinID = 0;
                 }
@@ -305,7 +305,7 @@ static void DrawMenu() {
                 // Operator skin
                 NeonToggle("Operator Skin", &bOperatorSkin, {1.f, 0.f, 1.f, 1.f});
                 if (bOperatorSkin) {
-                    ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().X * 0.6f);
+                    ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x * 0.6f);
                     ImGui::InputInt("Operator ID##os", &iOperatorSkinID);
                     if (iOperatorSkinID < 0) iOperatorSkinID = 0;
                 }
