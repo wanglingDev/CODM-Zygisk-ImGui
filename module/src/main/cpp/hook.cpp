@@ -277,8 +277,14 @@ void *hack_thread(void *arg) {
 
     LOGI("[ENI] hack_thread: scanning for il2cpp...");
 
+    // CODM Garena uses merged IL2CPP — game bytecode is compiled statically
+    // INTO libunity.so. There is no separate libil2cpp.so in this build.
+    // All RVAs in dump.cs / functions.h are relative to libunity.so's base.
     static const char* CANDIDATES[] = {
-        "libil2cpp.so", "libGameAssembly.so", nullptr
+        "libunity.so",        // correct for CODM Garena merged IL2CPP build
+        "libil2cpp.so",       // fallback for split builds
+        "libGameAssembly.so", // fallback for other Unity versions
+        nullptr
     };
 
     int iters = 0;
