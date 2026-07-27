@@ -228,8 +228,21 @@ int32_t ImGui_ImplAndroid_HandleInputEvent(const AInputEvent* input_event)
             int tool_type = AMotionEvent_getToolType(input_event, event_pointer_index);
             if (tool_type == AMOTION_EVENT_TOOL_TYPE_FINGER || tool_type == AMOTION_EVENT_TOOL_TYPE_UNKNOWN)
             {
-                io.AddMousePosEvent(AMotionEvent_getX(input_event, event_pointer_index), AMotionEvent_getY(input_event, event_pointer_index));
-                io.AddMouseButtonEvent(0, event_action == AMOTION_EVENT_ACTION_DOWN);
+                if (event_action == AMOTION_EVENT_ACTION_DOWN)
+                {
+                    io.AddMousePosEvent(AMotionEvent_getX(input_event, event_pointer_index), AMotionEvent_getY(input_event, event_pointer_index));
+                    io.AddMouseButtonEvent(0, true);
+                }
+                else // ACTION_UP
+                {
+                    // FIX for imgui #6627: after finger is lifted, reset MousePos to
+                    // (-FLT_MAX, -FLT_MAX). Without this, MousePos stays at the last
+                    // touch coordinate — ImGui keeps WantCaptureMouse=true and treats
+                    // the next tap as starting from the OLD position, causing buttons
+                    // (including the logo toggle) to never register a clean click.
+                    io.AddMouseButtonEvent(0, false);
+                    io.AddMousePosEvent(-FLT_MAX, -FLT_MAX);
+                }
             }
             break;
         }
