@@ -37,6 +37,8 @@
 #include <link.h>
 #include <pthread.h>
 #include <dirent.h>
+#include <android/input.h>
+#include "input_hook.h"
 #include <fcntl.h>
 
 #define GamePackageName "com.garena.game.codm"
