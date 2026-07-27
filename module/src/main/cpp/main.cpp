@@ -3,6 +3,7 @@
 #include <cstring>
 #include <jni.h>
 #include "hook.h"
+#include "input_hook.h"
 
 static std::atomic<bool> s_started{false};
 

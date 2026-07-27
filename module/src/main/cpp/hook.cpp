@@ -350,57 +350,6 @@ void *hack_thread(void *arg) {
         LOGE("[ENI] Try: adb shell setprop debug.hwui.renderer opengl");
     }
 
-    // ── Input hooks — libinput.so path varies by Android version ─────────────
-    // Android < 10  : /system/lib64/libinput.so
-    // Android 10-11 : /apex/com.android.media/lib64/libinput.so
-    // Android 12+   : /apex/com.android.media.swcodec/lib64/libinput.so
-    // Some OEMs     : /system_ext/lib64/libinput.so
-    static const char* LIBINPUT_PATHS[] = {
-#ifdef __aarch64__
-        "/system/lib64/libinput.so",
-        "/apex/com.android.media/lib64/libinput.so",
-        "/apex/com.android.media.swcodec/lib64/libinput.so",
-        "/apex/com.android.runtime/lib64/libinput.so",
-        "/system_ext/lib64/libinput.so",
-#else
-        "/system/lib/libinput.so",
-        "/apex/com.android.media/lib/libinput.so",
-        "/apex/com.android.media.swcodec/lib/libinput.so",
-        "/system_ext/lib/libinput.so",
-#endif
-        nullptr
-    };
-
-    void* libinput = nullptr;
-    for (int _pi = 0; LIBINPUT_PATHS[_pi] && !libinput; _pi++) {
-        libinput = dlopen(LIBINPUT_PATHS[_pi], RTLD_LAZY | RTLD_NOLOAD);
-        if (!libinput) libinput = dlopen(LIBINPUT_PATHS[_pi], RTLD_LAZY);
-        if (libinput)
-            LOGI("[ENI] libinput found at %s", LIBINPUT_PATHS[_pi]);
-    }
-
-    if (libinput) {
-        void* sym = dlsym(libinput,
-            "_ZN7android13InputConsumer21initializeMotionEventEPNS_11MotionEventEPKNS_12InputMessageE");
-        if (sym) {
-            int r = SHHook(sym, myInput, &origInput);
-            LOGI("[ENI] initializeMotionEvent: %s", r==0?"OK":"FAILED");
-        } else {
-            LOGI("[ENI] initializeMotionEvent symbol not found");
-        }
-
-        sym = dlsym(libinput,
-            "_ZN7android13InputConsumer7consumeEPNS_26InputEventFactoryInterfaceEblPjPPNS_10InputEventE");
-        if (sym) {
-            int r = SHHook(sym, myConsume, &origConsume);
-            LOGI("[ENI] consume hook: %s", r==0?"OK":"FAILED");
-        } else {
-            LOGI("[ENI] consume symbol not found");
-        }
-    } else {
-        LOGE("[ENI] libinput.so not found in any known path — touch blocked");
-    }
-
     LOGI("[ENI] hack_thread: setup complete!");
     return nullptr;
 }
