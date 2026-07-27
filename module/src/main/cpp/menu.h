@@ -582,12 +582,11 @@ EGLBoolean hook_eglSwapBuffers(EGLDisplay display, EGLSurface surface) {
     };
 
     // ── GL state save ────────────────────────────────────────────────
-    GLint gl_prog, gl_tex, gl_ab, gl_vab, gl_fbo, gl_vp[4];
+    GLint gl_prog, gl_tex, gl_ab, gl_fbo, gl_vp[4];
     GLboolean gl_blend, gl_cull, gl_depth, gl_stencil, gl_scissor;
     glGetIntegerv(GL_CURRENT_PROGRAM,      &gl_prog);
     glGetIntegerv(GL_TEXTURE_BINDING_2D,   &gl_tex);
     glGetIntegerv(GL_ARRAY_BUFFER_BINDING, &gl_ab);
-    glGetIntegerv(GL_VERTEX_ARRAY_BINDING, &gl_vab);
     glGetIntegerv(GL_FRAMEBUFFER_BINDING,  &gl_fbo);
     glGetIntegerv(GL_VIEWPORT,             gl_vp);
     gl_blend   = glIsEnabled(GL_BLEND);
@@ -627,7 +626,6 @@ EGLBoolean hook_eglSwapBuffers(EGLDisplay display, EGLSurface surface) {
     glUseProgram(gl_prog);
     glBindTexture(GL_TEXTURE_2D,      gl_tex);
     glBindBuffer(GL_ARRAY_BUFFER,     gl_ab);
-    glBindVertexArray(gl_vab);
     glBindFramebuffer(GL_FRAMEBUFFER, gl_fbo);
     glViewport(gl_vp[0], gl_vp[1],   gl_vp[2], gl_vp[3]);
     gl_blend   ? glEnable(GL_BLEND)        : glDisable(GL_BLEND);
