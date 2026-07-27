@@ -51,7 +51,8 @@
 // ══════════════════════════════════════════════════════════════════
 
 // ── Layer 1 & 2: remap + ELF wipe ────────────────────────────────
-struct LibRegion { uintptr_t start, end; };
+// prot flags derived from ELF Phdr p_flags
+struct LibRegion { uintptr_t start, end; int prot; };
 
 static int CollectSelfRegions_cb(dl_phdr_info* info, size_t, void* data) {
     Dl_info di;
@@ -66,7 +67,12 @@ static int CollectSelfRegions_cb(dl_phdr_info* info, size_t, void* data) {
         uintptr_t s = (info->dlpi_addr + ph.p_vaddr) & ~(uintptr_t)(getpagesize()-1);
         uintptr_t e = (info->dlpi_addr + ph.p_vaddr + ph.p_memsz + getpagesize()-1)
                       & ~(uintptr_t)(getpagesize()-1);
-        regions->push_back({s, e});
+        // Translate ELF Phdr flags → mmap prot bits
+        int prot = 0;
+        if (ph.p_flags & PF_R) prot |= PROT_READ;
+        if (ph.p_flags & PF_W) prot |= PROT_WRITE;
+        if (ph.p_flags & PF_X) prot |= PROT_EXEC;
+        regions->push_back({s, e, prot});
     }
     return 1;
 }
@@ -77,32 +83,33 @@ void bypass_remap_self() {
 
     for (auto& r : regions) {
         size_t sz = r.end - r.start;
+
+        // Stage in anonymous memory first
         void* anon = mmap(nullptr, sz, PROT_READ|PROT_WRITE,
                           MAP_PRIVATE|MAP_ANONYMOUS, -1, 0);
         if (anon == MAP_FAILED) continue;
-
         memcpy(anon, (void*)r.start, sz);
 
-        // Wipe ELF magic on first segment
-        if (r.start == regions[0].start) {
-            mprotect((void*)r.start, getpagesize(), PROT_READ|PROT_WRITE);
-            memset((void*)r.start, 0, 4);
-        }
+        // Wipe ELF magic in the copy (only first segment = .text header)
+        if (r.start == regions[0].start)
+            memset(anon, 0, 4);
 
         munmap((void*)r.start, sz);
 
-        void* fixed = mmap((void*)r.start, sz,
-                           PROT_READ|PROT_EXEC,
+        // Remap at original VA with CORRECT per-segment permissions.
+        // Critical: .data/.bss must stay PROT_READ|PROT_WRITE or static
+        // variable writes in the hooked functions will SIGSEGV.
+        void* fixed = mmap((void*)r.start, sz, r.prot,
                            MAP_PRIVATE|MAP_ANONYMOUS|MAP_FIXED, -1, 0);
         if (fixed == MAP_FAILED) {
-            mprotect(anon, sz, PROT_READ|PROT_EXEC);
+            mprotect(anon, sz, r.prot);
         } else {
             memcpy(fixed, anon, sz);
-            mprotect(fixed, sz, PROT_READ|PROT_EXEC);
+            mprotect(fixed, sz, r.prot);
             munmap(anon, sz);
         }
     }
-    LOGI("[ENI] bypass L1+L2: remap+ELF wipe done");
+    LOGI("[ENI] bypass L1+L2: remap+ELF wipe done (segment-correct perms)");
 }
 
 // ── Layer 3: solist removal (manual walk) ────────────────────────
