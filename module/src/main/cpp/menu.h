@@ -581,6 +581,11 @@ EGLBoolean hook_eglSwapBuffers(EGLDisplay display, EGLSurface surface) {
         (float)g_height / (float)g_screen_h
     };
 
+    static int g_frame_n = 0;
+    g_frame_n++;
+    bool dbg = (g_frame_n <= 3);
+    if (dbg) LOGI("[ENI] frame %d: GL save start", g_frame_n);
+
     // ── GL state save ────────────────────────────────────────────────
     GLint gl_prog, gl_tex, gl_ab, gl_fbo, gl_vp[4];
     GLboolean gl_blend, gl_cull, gl_depth, gl_stencil, gl_scissor;
@@ -595,6 +600,8 @@ EGLBoolean hook_eglSwapBuffers(EGLDisplay display, EGLSurface surface) {
     gl_stencil = glIsEnabled(GL_STENCIL_TEST);
     gl_scissor = glIsEnabled(GL_SCISSOR_TEST);
 
+    if (dbg) LOGI("[ENI] frame %d: GL state OK", g_frame_n);
+
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
     glDisable(GL_DEPTH_TEST);
     glDisable(GL_STENCIL_TEST);
@@ -605,23 +612,24 @@ EGLBoolean hook_eglSwapBuffers(EGLDisplay display, EGLSurface surface) {
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
     glViewport(0, 0, g_width, g_height);
 
+    if (dbg) LOGI("[ENI] frame %d: ImplOpenGL3_NewFrame", g_frame_n);
     ImGui_ImplOpenGL3_NewFrame();
+    if (dbg) LOGI("[ENI] frame %d: ImplAndroid_NewFrame", g_frame_n);
     ImGui_ImplAndroid_NewFrame();
+    if (dbg) LOGI("[ENI] frame %d: ImGui::NewFrame", g_frame_n);
     ImGui::NewFrame();
 
     float sw = (float)g_width, sh = (float)g_height;
 
-    // ESP + Aimbot dimatikan sementara — aktifkan setelah RVA diverifikasi via logcat
-    // ImDrawList* bgDL = ImGui::GetBackgroundDrawList();
-    // DrawESP(bgDL, sw, sh);
-    // AimbotTick(sw, sh);
-
-    // Mod menu
+    if (dbg) LOGI("[ENI] frame %d: DrawMenu", g_frame_n);
     DrawMenu();
 
+    if (dbg) LOGI("[ENI] frame %d: ImGui::Render", g_frame_n);
     ImGui::Render();
+    if (dbg) LOGI("[ENI] frame %d: RenderDrawData", g_frame_n);
     ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
 
+    if (dbg) LOGI("[ENI] frame %d: GL restore", g_frame_n);
     // ── GL state restore ──────────────────────────────────────────
     glUseProgram(gl_prog);
     glBindTexture(GL_TEXTURE_2D,      gl_tex);
@@ -634,6 +642,7 @@ EGLBoolean hook_eglSwapBuffers(EGLDisplay display, EGLSurface surface) {
     gl_stencil ? glEnable(GL_STENCIL_TEST) : glDisable(GL_STENCIL_TEST);
     gl_scissor ? glEnable(GL_SCISSOR_TEST) : glDisable(GL_SCISSOR_TEST);
 
+    if (dbg) LOGI("[ENI] frame %d: orig swap", g_frame_n);
     EGLBoolean res = old_eglSwapBuffers ? old_eglSwapBuffers(display, surface) : EGL_TRUE;
     pthread_mutex_unlock(&g_render_mutex);
     return res;
