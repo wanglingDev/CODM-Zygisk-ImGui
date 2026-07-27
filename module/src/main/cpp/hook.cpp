@@ -244,12 +244,11 @@ int isGame(JNIEnv *env, jstring appDataDir) {
 
 // ── Input hooks ───────────────────────────────────────────────────
 HOOKAF(void, Input, void *thiz, void *ex_ab, void *ex_ac) {
-    // FIXED: ImGui processes touch FIRST.
-    // Old order (game first) meant origInput already consumed the event
-    // before ImGui saw it — logo button taps landed as game actions,
-    // ImGui never got a clean ACTION_DOWN/UP cycle → stuck MouseDown[0].
+    // ImGui first — gets a clean ACTION_DOWN/UP cycle.
+    // imgui_impl_android resets MousePos→(-FLT_MAX,-FLT_MAX) on UP (imgui #6627)
+    // so WantCaptureMouse clears next frame; game touches outside the window
+    // are never swallowed.
     ImGui_ImplAndroid_HandleInputEvent((AInputEvent*)thiz);
-    // Only pass to game if ImGui is NOT capturing this touch point.
     if (!ImGui::GetIO().WantCaptureMouse)
         origInput(thiz, ex_ab, ex_ac);
 }
@@ -257,9 +256,19 @@ HOOKAF(void, Input, void *thiz, void *ex_ab, void *ex_ac) {
 HOOKAF(int32_t, Consume, void *thiz, void *arg1, bool arg2, long arg3,
        uint32_t *arg4, AInputEvent **input_event) {
     if (input_event && *input_event) {
+        // Check BEFORE feeding to ImGui whether this touch lands on a window.
+        // WantCaptureMouse is evaluated AFTER HandleInputEvent, which is too late
+        // for the Consume path — by then origConsume would already have run.
+        // So we peek at the touch position first.
+        float ex = AMotionEvent_getX(*input_event, 0);
+        float ey = AMotionEvent_getY(*input_event, 0);
+        bool  onWindow = ImGui::GetIO().MouseDown[0] || TouchHitsImGuiWindow(ex, ey);
+
         ImGui_ImplAndroid_HandleInputEvent(*input_event);
-        // Block game from consuming touch events that ImGui owns
-        if (ImGui::GetIO().WantCaptureMouse)
+
+        // Block origConsume only when this touch was on our window.
+        // All game touches (outside the window) still reach origConsume.
+        if (onWindow && ImGui::GetIO().WantCaptureMouse)
             return 0;
     }
     return origConsume(thiz, arg1, arg2, arg3, arg4, input_event);

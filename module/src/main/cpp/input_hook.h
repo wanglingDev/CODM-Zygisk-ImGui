@@ -6,9 +6,14 @@
  * the fnPtr with our own. Then in our hook we read X/Y/action from the Java
  * MotionEvent object and feed them to ImGui.
  *
- * This works on all Android versions (no APEX path hunting needed) because
- * the JNI function table is a plain struct pointer shared by every JNIEnv in
- * the process.
+ * FIXES applied vs original:
+ *  1. ACTION_UP/CANCEL: reset MousePos to (-FLT_MAX,-FLT_MAX) after button-up
+ *     so ImGui stops claiming WantCaptureMouse on the next frame (imgui #6627).
+ *  2. ACTION_POINTER_DOWN/UP: use getX(pointerIndex)/getY(pointerIndex)
+ *     instead of getX(0)/getY(0) — fixes wrong coords on multi-touch.
+ *  3. Window-bounds guard: only forward touch to ImGui if the touch position
+ *     falls inside the ImGui window rect, OR if ImGui already has mouse down.
+ *     This prevents any game touch outside the menu from being silently eaten.
  */
 #pragma once
 #include <jni.h>
@@ -16,17 +21,17 @@
 #include <sys/mman.h>
 #include <unistd.h>
 #include <cstring>
+#include <cfloat>
 #include "imgui.h"
+#include "imgui_internal.h"   // ImGui::FindWindowByName, ImGuiWindow
 
 #define INP_TAG "zyCheats"
 #define INP_LOGI(...) __android_log_print(ANDROID_LOG_INFO,  INP_TAG, __VA_ARGS__)
 #define INP_LOGE(...) __android_log_print(ANDROID_LOG_ERROR, INP_TAG, __VA_ARGS__)
 
 // JNI spec: RegisterNatives is slot 215 in the function table
-// (https://docs.oracle.com/javase/8/docs/technotes/guides/jni/spec/functions.html)
 static constexpr int JNI_REGISTERNATIVES_SLOT = 215;
 
-// Saved originals
 typedef jboolean (*NativeInjectFn)(JNIEnv*, jobject, jobject);
 typedef jint     (*RegisterNativesFn)(JNIEnv*, jclass, const JNINativeMethod*, jint);
 
@@ -34,23 +39,61 @@ static NativeInjectFn    g_orig_nativeInjectEvent = nullptr;
 static RegisterNativesFn g_orig_RegisterNatives   = nullptr;
 static JavaVM*           g_jvm                    = nullptr;
 
+// ── Helper: is touch point (x,y) inside ANY visible ImGui window? ─────────────
+// Only touches that land on a window get forwarded to ImGui.
+// Everything else goes straight to the game — no more phantom captures.
+static bool TouchHitsImGuiWindow(float x, float y) {
+    ImGuiContext* ctx = ImGui::GetCurrentContext();
+    if (!ctx) return false;
+    // Walk the window display list (front-to-back)
+    for (int i = ctx->Windows.Size - 1; i >= 0; i--) {
+        ImGuiWindow* w = ctx->Windows[i];
+        if (!w || (w->Flags & ImGuiWindowFlags_NoMouseInputs)) continue;
+        if (w->Hidden || w->Collapsed) continue;
+        // Rect.Min / Rect.Max are in screen coords
+        if (x >= w->Rect().Min.x && x <= w->Rect().Max.x &&
+            y >= w->Rect().Min.y && y <= w->Rect().Max.y)
+            return true;
+    }
+    return false;
+}
+
 // ── Our nativeInjectEvent replacement ────────────────────────────────────────
 static jboolean hook_nativeInjectEvent(JNIEnv* env, jobject thiz, jobject motionEvent) {
-    if (motionEvent && ImGui::GetCurrentContext()) {
+    if (!motionEvent || !ImGui::GetCurrentContext())
+        goto passthrough;
+
+    {
         ImGuiIO& io = ImGui::GetIO();
 
         jclass cls = env->FindClass("android/view/MotionEvent");
-        if (cls) {
-            jmethodID mGetAction = env->GetMethodID(cls, "getAction", "()I");
-            jmethodID mGetX      = env->GetMethodID(cls, "getX",      "()F");
-            jmethodID mGetY      = env->GetMethodID(cls, "getY",      "()F");
+        if (!cls) goto passthrough;
 
-            jint  action = env->CallIntMethod  (motionEvent, mGetAction);
-            jfloat x    = env->CallFloatMethod (motionEvent, mGetX);
-            jfloat y    = env->CallFloatMethod (motionEvent, mGetY);
-            env->DeleteLocalRef(cls);
+        jmethodID mGetAction       = env->GetMethodID(cls, "getAction",       "()I");
+        jmethodID mGetX            = env->GetMethodID(cls, "getX",            "(I)F");
+        jmethodID mGetY            = env->GetMethodID(cls, "getY",            "(I)F");
+        jmethodID mGetPointerCount = env->GetMethodID(cls, "getPointerCount", "()I");
+        env->DeleteLocalRef(cls);
 
-            int act = action & 0xFF; // lower byte = action code
+        if (!mGetAction || !mGetX || !mGetY) goto passthrough;
+
+        jint  rawAction = env->CallIntMethod(motionEvent, mGetAction);
+        int   act       = rawAction & 0xFF;
+        // Pointer index encoded in upper byte for POINTER_DOWN/UP
+        int   ptrIdx    = (rawAction >> 8) & 0xFF;
+
+        jfloat x = env->CallFloatMethod(motionEvent, mGetX, (jint)ptrIdx);
+        jfloat y = env->CallFloatMethod(motionEvent, mGetY, (jint)ptrIdx);
+
+        // Decide whether ImGui should see this touch at all.
+        // If mouse button is already held (drag), keep sending to ImGui.
+        // Otherwise, only forward if the touch lands inside a window.
+        bool imguiHeld   = io.MouseDown[0];
+        bool hitsWindow  = TouchHitsImGuiWindow(x, y);
+        bool sendToImGui = imguiHeld || hitsWindow;
+
+        if (sendToImGui) {
+            io.AddMouseSourceEvent(ImGuiMouseSource_TouchScreen);
             io.AddMousePosEvent(x, y);
 
             switch (act) {
@@ -58,20 +101,29 @@ static jboolean hook_nativeInjectEvent(JNIEnv* env, jobject thiz, jobject motion
                 case 5: // ACTION_POINTER_DOWN
                     io.AddMouseButtonEvent(0, true);
                     break;
+
                 case 1: // ACTION_UP
                 case 6: // ACTION_POINTER_UP
                 case 3: // ACTION_CANCEL
                     io.AddMouseButtonEvent(0, false);
+                    // FIX #1: reset MousePos so ImGui stops claiming
+                    // WantCaptureMouse=true on the next frame (imgui #6627).
+                    // Without this, the next game-touch was eaten by ImGui
+                    // because it still thought the cursor was over the window.
+                    io.AddMousePosEvent(-FLT_MAX, -FLT_MAX);
                     break;
-                default: break;
+
+                default:
+                    break; // ACTION_MOVE — pos already updated above
             }
 
-            // Block the game from receiving this touch if ImGui wants it
-            if (io.WantCaptureMouse) {
+            // Block game from receiving this touch only while ImGui wants it
+            if (io.WantCaptureMouse)
                 return JNI_TRUE;
-            }
         }
     }
+
+passthrough:
     if (g_orig_nativeInjectEvent)
         return g_orig_nativeInjectEvent(env, thiz, motionEvent);
     return JNI_FALSE;
@@ -85,7 +137,6 @@ static jint hook_RegisterNatives(JNIEnv* env, jclass clazz,
             INP_LOGI("[ENI] RegisterNatives: intercepted nativeInjectEvent!");
             g_orig_nativeInjectEvent =
                 reinterpret_cast<NativeInjectFn>(methods[i].fnPtr);
-            // Replace the function pointer in place before Unity registers it
             const_cast<JNINativeMethod*>(methods)[i].fnPtr =
                 reinterpret_cast<void*>(hook_nativeInjectEvent);
         }
@@ -105,9 +156,6 @@ static bool InstallInputHook(JavaVM* jvm) {
         }
     }
 
-    // env->functions is const JNINativeInterface* — strip const first, then reinterpret.
-    // Clang rejects reinterpret_cast<const void**> because it discards qualifiers;
-    // the correct sequence is const_cast first, reinterpret_cast second.
     void** table = reinterpret_cast<void**>(
         const_cast<JNINativeInterface*>(env->functions));
 
