@@ -68,8 +68,9 @@ bool  bShowDebug    = false;
 // ════════════════════════════════════════════════════════════════
 //  EGL HOOK STATE
 // ════════════════════════════════════════════════════════════════
-extern EGLBoolean (*orig_eglSwapBuffers)(EGLDisplay, EGLSurface);
-// Backward-compat alias — some hook.cpp versions still reference old_eglSwapBuffers
+// orig_eglSwapBuffers is defined as `static` in hook.cpp — no extern needed.
+// menu.h is included inside hook.cpp so the static var is already in scope.
+// Backward-compat alias for older hook.cpp that used old_eglSwapBuffers name:
 #define old_eglSwapBuffers orig_eglSwapBuffers
 static bool        g_imgui_init = false;
 static int         g_width = 0, g_height = 0;
