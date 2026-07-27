@@ -258,19 +258,10 @@ HOOKAF(void, Input, void *thiz, void *ex_ab, void *ex_ac) {
 HOOKAF(int32_t, Consume, void *thiz, void *arg1, bool arg2, long arg3,
        uint32_t *arg4, AInputEvent **input_event) {
     if (input_event && *input_event) {
-        // Check BEFORE feeding to ImGui whether this touch lands on a window.
-        // WantCaptureMouse is evaluated AFTER HandleInputEvent, which is too late
-        // for the Consume path — by then origConsume would already have run.
-        // So we peek at the touch position first.
-        float ex = AMotionEvent_getX(*input_event, 0);
-        float ey = AMotionEvent_getY(*input_event, 0);
-        bool  onWindow = ImGui::GetIO().MouseDown[0] || TouchHitsImGuiWindow(ex, ey);
-
+        // input_hook.h writes directly to io.MousePos/MouseDown[0] —
+        // WantCaptureMouse reflects THIS frame's state, not the queue.
         ImGui_ImplAndroid_HandleInputEvent(*input_event);
-
-        // Block origConsume only when this touch was on our window.
-        // All game touches (outside the window) still reach origConsume.
-        if (onWindow && ImGui::GetIO().WantCaptureMouse)
+        if (ImGui::GetIO().WantCaptureMouse)
             return 0;
     }
     return origConsume(thiz, arg1, arg2, arg3, arg4, input_event);
