@@ -105,10 +105,11 @@ static bool InstallInputHook(JavaVM* jvm) {
         }
     }
 
-    // The JNI function table is a const struct — we need to make the page
-    // writable to patch the RegisterNatives slot.
-    void** table = const_cast<void**>(
-        reinterpret_cast<const void**>(env->functions));
+    // env->functions is const JNINativeInterface* — strip const first, then reinterpret.
+    // Clang rejects reinterpret_cast<const void**> because it discards qualifiers;
+    // the correct sequence is const_cast first, reinterpret_cast second.
+    void** table = reinterpret_cast<void**>(
+        const_cast<JNINativeInterface*>(env->functions));
 
     uintptr_t slot_addr = reinterpret_cast<uintptr_t>(&table[JNI_REGISTERNATIVES_SLOT]);
     uintptr_t page      = slot_addr & ~static_cast<uintptr_t>(getpagesize() - 1);
