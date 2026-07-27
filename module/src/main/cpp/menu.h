@@ -343,18 +343,92 @@ static void AimbotTick(float sw, float sh) {
 //  MENU DRAW
 // ════════════════════════════════════════════════════════════════
 static void DrawMenu() {
-    ImGuiIO& io = ImGui::GetIO();
+    ImGuiIO& io  = ImGui::GetIO();
     float sw = io.DisplaySize.x, sh = io.DisplaySize.y;
 
+    // ── State ────────────────────────────────────────────────────
+    static bool  showMenu   = true;   // full window visible
+    static float iconX      = sw * 0.01f;  // icon position (draggable)
+    static float iconY      = sh * 0.30f;
+    static bool  iconDrag   = false;
+    static float dragOffX   = 0.f, dragOffY = 0.f;
+
+    // ── Floating Icon (always rendered) ─────────────────────────
+    // Small transparent window, no title bar, no padding.
+    // Single labelled button acts as the toggle + drag handle.
+    ImGui::SetNextWindowPos({iconX, iconY}, ImGuiCond_Always);
+    ImGui::SetNextWindowSize({56.f, 56.f}, ImGuiCond_Always);
+    ImGui::SetNextWindowBgAlpha(0.0f);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding,  {0.f, 0.f});
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowMinSize,  {0.f, 0.f});
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.f);
+    ImGui::Begin("##floatIcon",
+                 nullptr,
+                 ImGuiWindowFlags_NoTitleBar   |
+                 ImGuiWindowFlags_NoScrollbar  |
+                 ImGuiWindowFlags_NoNav        |
+                 ImGuiWindowFlags_NoSavedSettings |
+                 ImGuiWindowFlags_NoBackground |
+                 ImGuiWindowFlags_NoDecoration |
+                 ImGuiWindowFlags_AlwaysAutoResize);
+    ImGui::PopStyleVar(3);
+
+    // Glowing circle icon button
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    ImVec2 btnMin = ImGui::GetCursorScreenPos();
+    ImVec2 center = {btnMin.x + 28.f, btnMin.y + 28.f};
+
+    // Outer ring
+    dl->AddCircle(center, 27.f, IM_COL32(0,255,255,200), 48, 2.f);
+    // Inner fill (dimmed when hidden)
+    dl->AddCircleFilled(center, 24.f,
+        showMenu ? IM_COL32(0,200,200,80) : IM_COL32(30,30,30,160), 48);
+    // Label
+    const char* lbl = showMenu ? "G" : "G";
+    ImVec2 txtSz = ImGui::CalcTextSize(lbl);
+    dl->AddText({center.x - txtSz.x*0.5f, center.y - txtSz.y*0.5f},
+                IM_COL32(0,255,255,255), lbl);
+
+    // Invisible button covers the full 56×56 area — handles tap + drag
+    ImGui::InvisibleButton("##iconBtn", {56.f, 56.f});
+
+    // Drag the icon
+    if (ImGui::IsItemActive() && ImGui::IsMouseDragging(0, 2.f)) {
+        iconX = ImClamp(io.MousePos.x - 28.f, 0.f, sw - 56.f);
+        iconY = ImClamp(io.MousePos.y - 28.f, 0.f, sh - 56.f);
+    }
+
+    // Tap (not a drag) toggles the main window
+    if (ImGui::IsItemDeactivated() && !ImGui::IsMouseDragging(0, 4.f)) {
+        showMenu = !showMenu;
+    }
+
+    ImGui::End();
+
+    // ── Early out if minimised ───────────────────────────────────
+    if (!showMenu) return;
+
+    // ── Main Window ─────────────────────────────────────────────
     // Plain always-visible draggable window — no toggle, no close button.
     // Drag the title bar to reposition. Safe from rapid-tap crashes.
     ImGui::SetNextWindowPos({sw*0.03f,sh*0.05f},ImGuiCond_Once);
     ImGui::SetNextWindowSize({sw*0.58f,sh*0.86f},ImGuiCond_Once);
     ImGui::SetNextWindowBgAlpha(0.93f);
 
+    // Clamp inside screen every frame so it can't be dragged offscreen
+    {
+        ImVec2 wpos = ImGui::GetWindowPos();
+        ImVec2 wsz  = ImGui::GetWindowSize();
+        float cx = ImClamp(wpos.x, 0.f, sw - wsz.x);
+        float cy = ImClamp(wpos.y, 0.f, sh - wsz.y);
+        if (cx != wpos.x || cy != wpos.y)
+            ImGui::SetNextWindowPos({cx, cy}, ImGuiCond_Always);
+    }
+
     ImGuiWindowFlags wf = ImGuiWindowFlags_NoScrollbar
                         | ImGuiWindowFlags_NoCollapse
-                        | ImGuiWindowFlags_NoNav;
+                        | ImGuiWindowFlags_NoNav
+                        | ImGuiWindowFlags_NoSavedSettings;
     ImGui::Begin("  ★ GAERIS  v2.0", nullptr, wf);
 
     ImGui::PushStyleColor(ImGuiCol_Separator,ImVec4(0.f,1.f,1.f,0.6f));
