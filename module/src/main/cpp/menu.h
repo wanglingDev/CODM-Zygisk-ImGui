@@ -88,7 +88,8 @@ void InstallFeatureHooks() {
 // orig_eglSwapBuffers is defined in hook.cpp (set by DobbyHook)
 extern EGLBoolean (*orig_eglSwapBuffers)(EGLDisplay, EGLSurface);
 static bool        g_imgui_init = false;
-static int         g_width = 0, g_height = 0;
+// Defined in hook.cpp, shared across menu.h and touch_input.h
+extern EGLint      g_width, g_height;
 
 // ── helpers ──────────────────────────────────────────────────────
 static void ApplyCyberpunkTheme() {

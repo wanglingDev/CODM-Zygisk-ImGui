@@ -1,5 +1,7 @@
 #pragma once
-// ════════════════════════════════════════════════════════════════
+// g_width / g_height defined in hook.cpp
+#include <EGL/egl.h>
+extern EGLint g_width, g_height;
 //  TOUCH INPUT — multi-layer approach:
 //  Layer 1: libinput.so hook (best, calls origInput first)
 //  Layer 2: /dev/input/eventX polling thread (fallback)
@@ -123,15 +125,12 @@ static void* touch_poll_thread(void*) {
                 if (slot == 0) {
                     // Scale raw → screen pixels
                     float pct = (ev.value - ax_min) / (ax_max - ax_min);
-                    // Width available at render time via g_width (extern)
-                    extern EGLint g_width;
                     cx = pct * (float)g_width;
                 }
                 break;
             case ABS_MT_POSITION_Y:
                 if (slot == 0) {
                     float pct = (ev.value - ay_min) / (ay_max - ay_min);
-                    extern EGLint g_height;
                     cy = pct * (float)g_height;
                 }
                 break;
