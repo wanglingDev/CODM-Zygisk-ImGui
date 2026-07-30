@@ -472,6 +472,8 @@ EGLBoolean hook_eglSwapBuffers(EGLDisplay display, EGLSurface surface) {
 
         ApplyCyberpunkTheme();
         LOGI("[ENI] frame %d: ImGui_ImplAndroid_Init", g_frame_count);
+        // Pass nullptr-safe: we never call ImGui_ImplAndroid_NewFrame()
+        // (which dereferences the window pointer). We use CustomAndroidNewFrame() instead.
         ImGui_ImplAndroid_Init(nullptr);
         LOGI("[ENI] frame %d: ImGui_ImplOpenGL3_Init", g_frame_count);
         ImGui_ImplOpenGL3_Init("#version 100");
@@ -487,7 +489,10 @@ EGLBoolean hook_eglSwapBuffers(EGLDisplay display, EGLSurface surface) {
     ImGui::GetIO().DisplaySize = { (float)g_width, (float)g_height };
 
     ImGui_ImplOpenGL3_NewFrame();
-    ImGui_ImplAndroid_NewFrame();
+    // CustomAndroidNewFrame: sets DisplaySize + DeltaTime WITHOUT dereferencing ANativeWindow
+    CustomAndroidNewFrame(g_width, g_height);
+    // Flush pending touch events from polling thread / libinput hook to ImGui IO
+    FlushTouchToImGui();
     ImGui::NewFrame();
 
     if (verbose) LOGI("[ENI] frame %d: DrawMenu", g_frame_count);

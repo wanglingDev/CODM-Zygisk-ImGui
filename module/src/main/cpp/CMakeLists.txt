@@ -37,6 +37,7 @@ include_directories(Includes)
 include_directories(Includes/Dobby)
 include_directories(ImGui)
 include_directories(ImGui/backends)
+# touch_input.h is in the same directory as hook.cpp
 
 add_library(${MODULE_NAME}
         SHARED
