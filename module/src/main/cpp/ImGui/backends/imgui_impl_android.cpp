@@ -284,9 +284,21 @@ void ImGui_ImplAndroid_NewFrame()
     ImGuiIO& io = ImGui::GetIO();
 
     // Setup display size (every frame to accommodate for window resizing)
-    int32_t window_width = ANativeWindow_getWidth(g_Window);
-    int32_t window_height = ANativeWindow_getHeight(g_Window);
-    int display_width = window_width;
+    // ── MOD PATCH: null-safe window size ────────────────────────────
+    // In injected mods, g_Window may be nullptr or a dummy pointer.
+    // Fall back to dimensions from eglQuerySurface (set by hook_eglSwapBuffers).
+    extern EGLint g_width, g_height;
+    int32_t window_width  = 0;
+    int32_t window_height = 0;
+    if (g_Window) {
+        // Use orig hooks if available (avoid infinite recursion if hooked)
+        window_width  = ANativeWindow_getWidth(g_Window);
+        window_height = ANativeWindow_getHeight(g_Window);
+    }
+    // Fallback: use EGL surface dimensions (always valid)
+    if (window_width  <= 0) window_width  = g_width;
+    if (window_height <= 0) window_height = g_height;
+    int display_width  = window_width;
     int display_height = window_height;
 
     io.DisplaySize = ImVec2((float)window_width, (float)window_height);
