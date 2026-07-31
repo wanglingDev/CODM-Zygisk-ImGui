@@ -1,228 +1,165 @@
+/**
+ * touch_input.h — Unity nativeInjectEvent hook (confirmed working method)
+ *
+ * Why AMotionEvent_getAction from libandroid.so never worked:
+ *   Unity on Android processes touch via Java android.view.MotionEvent,
+ *   dispatched through com.unity3d.player.UnityPlayer.onTouchEvent() →
+ *   nativeInjectEvent(). The NDK AInputEvent C API (AMotionEvent_getAction etc.)
+ *   is NOT called by Unity — only NativeActivity games use it.
+ *
+ * Correct approach (confirmed from Unity crash traces + working mods):
+ *   Hook Java_com_unity3d_player_UnityPlayer_nativeInjectEvent__Landroid_view_InputEvent_2
+ *   directly in libunity.so using DobbySymbolResolver. Every touch Unity receives
+ *   passes through this JNI bridge exactly once. Read X/Y/action via JNI MotionEvent
+ *   methods, buffer atomically, flush to ImGui IO each frame from eglSwapBuffers.
+ */
 #pragma once
-// ════════════════════════════════════════════════════════════════
-//  TOUCH INPUT v3 — AMotionEvent_getAction hook dari libandroid.so
-//
-//  Kenapa lebih baik dari libinput + /dev/input:
-//    • libandroid.so ada di semua Android (tidak kena APEX shuffle)
-//    • AMotionEvent_getX/Y sudah screen-space yang benar
-//    • Tidak perlu kalibrasi abs_min/abs_max manual
-//    • Satu hook saja, footprint minimal
-//    • io.AddMouseSourceEvent(ImGuiMouseSource_TouchScreen)
-//      selama ini miss → ImGui salah interpret button state
-//
-//  Flow:
-//    InstallMotionHooks()  → hook AMotionEvent_getAction di libandroid.so
-//    hook_AMotionEvent_getAction → observe setiap touch event Unity,
-//                                  buffer {x, y, action} secara atomik
-//    FlushTouchToImGui()   → dipanggil tiap frame dari hook_eglSwapBuffers,
-//                            flush buffer → ImGui IO dengan source=TouchScreen
-// ════════════════════════════════════════════════════════════════
+#include <jni.h>
 #include <android/input.h>
-#include <android/native_window.h>
 #include <dlfcn.h>
 #include <atomic>
 #include <chrono>
+#include <cstring>
 #include "imgui.h"
 #include "dobby.h"
 #include "hook.h"
 
-// ── Global EGL surface dimensions (set in hook_eglSwapBuffers) ────
 extern int g_width, g_height;
 
-// ── ANativeWindow pointer — untuk ImGui_ImplAndroid_Init ──────────
-static ANativeWindow* g_Window = nullptr;
+// ── Lock-free single-slot touch buffer ───────────────────────────────────────
+// Packs: valid(1) | down(1) | y(15) | x(15) = 32 bits
+// 15-bit coords → max 32767 px, enough for any phone screen
+static std::atomic<uint32_t> g_touchBuf{0};
 
-// ════════════════════════════════════════════════════════════════
-//  Layer 1: ANativeWindow_getWidth/Height hook
-//  Dipanggil Unity setiap frame → kita capture window pointer.
-// ════════════════════════════════════════════════════════════════
-static int32_t (*orig_ANW_getWidth)(ANativeWindow*)  = nullptr;
-static int32_t (*orig_ANW_getHeight)(ANativeWindow*) = nullptr;
-
-static int32_t hook_ANW_getWidth(ANativeWindow* window) {
-    if (window && !g_Window) {
-        g_Window = window;
-        LOGI("[ENI] ANativeWindow captured: %p", (void*)window);
-    }
-    return orig_ANW_getWidth ? orig_ANW_getWidth(window) : g_width;
+static inline uint32_t PackTouch(float x, float y, bool down, bool valid) {
+    uint16_t ix = (uint16_t)std::max(0.f, std::min(x, 32767.f));
+    uint16_t iy = (uint16_t)std::max(0.f, std::min(y, 32767.f));
+    return ((uint32_t)(valid?1:0) << 31) |
+           ((uint32_t)(down ?1:0) << 30) |
+           ((uint32_t)(iy & 0x7FFF) << 15) |
+           (uint32_t)(ix & 0x7FFF);
 }
-static int32_t hook_ANW_getHeight(ANativeWindow* window) {
-    if (window && !g_Window) g_Window = window;
-    return orig_ANW_getHeight ? orig_ANW_getHeight(window) : g_height;
+struct TS { float x,y; bool down,valid; };
+static inline TS UnpackTouch(uint32_t v) {
+    return { (float)(v & 0x7FFF), (float)((v>>15)&0x7FFF),
+             (bool)((v>>30)&1),   (bool)((v>>31)&1) };
 }
 
-static void InstallWindowHooks() {
-    void* libandroid = dlopen("libandroid.so", RTLD_LAZY | RTLD_NOLOAD);
-    if (!libandroid) libandroid = dlopen("libandroid.so", RTLD_LAZY);
-    if (!libandroid) { LOGE("[ENI] InstallWindowHooks: libandroid.so not found"); return; }
+// ── Cached JNI method IDs (set once on first call) ───────────────────────────
+static jmethodID g_mid_getAction = nullptr;
+static jmethodID g_mid_getX      = nullptr;
+static jmethodID g_mid_getY      = nullptr;
+static jclass    g_motionCls     = nullptr;
 
-    void* sym_w = dlsym(libandroid, "ANativeWindow_getWidth");
-    void* sym_h = dlsym(libandroid, "ANativeWindow_getHeight");
-    if (sym_w) { int r = DobbyHook(sym_w,(void*)hook_ANW_getWidth,(void**)&orig_ANW_getWidth);
-                 LOGI("[ENI] ANativeWindow_getWidth hook: %s", r==0?"OK":"FAIL"); }
-    if (sym_h) { int r = DobbyHook(sym_h,(void*)hook_ANW_getHeight,(void**)&orig_ANW_getHeight);
-                 LOGI("[ENI] ANativeWindow_getHeight hook: %s", r==0?"OK":"FAIL"); }
+static void CacheMotionMethods(JNIEnv* env) {
+    if (g_mid_getAction) return;
+    jclass cls = env->FindClass("android/view/MotionEvent");
+    if (!cls) return;
+    g_motionCls     = (jclass)env->NewGlobalRef(cls);
+    g_mid_getAction = env->GetMethodID(g_motionCls, "getAction", "()I");
+    g_mid_getX      = env->GetMethodID(g_motionCls, "getX",      "()F");
+    g_mid_getY      = env->GetMethodID(g_motionCls, "getY",      "()F");
+    env->DeleteLocalRef(cls);
+    LOGI("[ENI] MotionEvent JNI methods cached");
 }
 
-// ════════════════════════════════════════════════════════════════
-//  Layer 2: AMotionEvent_getAction hook
-//
-//  Strategi:
-//  • Simpan real_AMotionEvent_getX/Y via dlsym SEBELUM hook apapun
-//    (pointer ke fungsi asli, bukan trampoline Dobby)
-//  • Hook hanya AMotionEvent_getAction — satu hook, Unity memanggil
-//    ini untuk SETIAP touch event yang diproses
-//  • Di hook: baca x/y via real_* lalu simpan atomik ke g_lastTouch
-//  • FlushTouchToImGui() per-frame membaca buffer lalu push ke ImGui IO
-// ════════════════════════════════════════════════════════════════
+// ── nativeInjectEvent hook ────────────────────────────────────────────────────
+typedef jboolean (*NativeInjectFn)(JNIEnv*, jobject, jobject);
+static NativeInjectFn orig_nativeInjectEvent = nullptr;
 
-struct TouchSample {
-    float   x, y;
-    int32_t action; // AMOTION_EVENT_ACTION_* masked
-    bool    valid;
-};
+static jboolean hook_nativeInjectEvent(JNIEnv* env, jobject thiz, jobject inputEvent) {
+    if (inputEvent && ImGui::GetCurrentContext()) {
+        CacheMotionMethods(env);
 
-// Lock-free single-slot buffer — sufficient for 60/90 fps game
-// (frame rate >> input event rate)
-static std::atomic<uint64_t> g_touchPacked{0};  // packed: valid|action|y16|x16
+        if (g_motionCls && g_mid_getAction &&
+            env->IsInstanceOf(inputEvent, g_motionCls)) {
 
-static inline uint64_t PackTouch(float x, float y, int32_t action, bool valid) {
-    uint16_t ix = (uint16_t)std::max(0.f, std::min(x, 65535.f));
-    uint16_t iy = (uint16_t)std::max(0.f, std::min(y, 65535.f));
-    return ((uint64_t)(valid ? 1 : 0) << 48) |
-           ((uint64_t)(uint8_t)action  << 40) |
-           ((uint64_t)iy               << 16) |
-           (uint64_t)ix;
-}
-static inline TouchSample UnpackTouch(uint64_t v) {
-    TouchSample s;
-    s.valid  = (v >> 48) & 1;
-    s.action = (int32_t)((v >> 40) & 0xFF);
-    s.y      = (float)((v >> 16) & 0xFFFF);
-    s.x      = (float)(v & 0xFFFF);
-    return s;
-}
+            jint  action = env->CallIntMethod(inputEvent, g_mid_getAction);
+            jfloat x     = env->CallFloatMethod(inputEvent, g_mid_getX);
+            jfloat y     = env->CallFloatMethod(inputEvent, g_mid_getY);
+            int    act   = action & 0xFF;
 
-// Pre-saved BEFORE any hooks — real libandroid.so function pointers
-static float   (*real_AMotionEvent_getX)(const AInputEvent*, size_t) = nullptr;
-static float   (*real_AMotionEvent_getY)(const AInputEvent*, size_t) = nullptr;
-static int32_t (*orig_AMotionEvent_getAction)(const AInputEvent*)    = nullptr;
+            bool down = (act == AMOTION_EVENT_ACTION_DOWN ||
+                         act == AMOTION_EVENT_ACTION_MOVE ||
+                         act == 5); // POINTER_DOWN
 
-static int32_t hook_AMotionEvent_getAction(const AInputEvent* ev) {
-    int32_t raw    = orig_AMotionEvent_getAction(ev);
-    int32_t masked = raw & AMOTION_EVENT_ACTION_MASK;
+            // Buffer the event (render thread reads it via FlushTouchToImGui)
+            g_touchBuf.store(PackTouch(x, y, down, true),
+                             std::memory_order_release);
 
-    // Only care about primary pointer (pointer index 0)
-    // Pointer index is encoded in the upper byte of action — index==0 means
-    // masked action is exactly DOWN/MOVE/UP (not POINTER_DOWN/UP).
-    if (masked == AMOTION_EVENT_ACTION_DOWN ||
-        masked == AMOTION_EVENT_ACTION_MOVE ||
-        masked == AMOTION_EVENT_ACTION_UP) {
-        if (real_AMotionEvent_getX && real_AMotionEvent_getY) {
-            float x = real_AMotionEvent_getX(ev, 0);
-            float y = real_AMotionEvent_getY(ev, 0);
-            g_touchPacked.store(PackTouch(x, y, masked, true),
-                                std::memory_order_release);
+            // If ImGui is consuming touch, don't pass to game
+            if (ImGui::GetIO().WantCaptureMouse) {
+                return JNI_TRUE;
+            }
         }
     }
-    return raw;
+    return orig_nativeInjectEvent ? orig_nativeInjectEvent(env, thiz, inputEvent)
+                                  : JNI_FALSE;
 }
 
-// ── InstallMotionHooks — call once from hack_thread ───────────────
+// ── InstallMotionHooks — call once from hack_thread ───────────────────────────
 static void InstallMotionHooks() {
-    void* libandroid = dlopen("libandroid.so", RTLD_LAZY | RTLD_NOLOAD);
-    if (!libandroid) libandroid = dlopen("libandroid.so", RTLD_LAZY);
-    if (!libandroid) { LOGE("[ENI] InstallMotionHooks: libandroid.so not found"); return; }
+    // Confirmed symbol names from Unity crash traces (JNI mangled + short form)
+    static const char* SYMBOLS[] = {
+        "Java_com_unity3d_player_UnityPlayer_nativeInjectEvent__Landroid_view_InputEvent_2",
+        "Java_com_unity3d_player_UnityPlayer_nativeInjectEvent",
+        "Java_com_unity3d_player_ReflectionHelper_nativeInjectEvent__Landroid_view_InputEvent_2",
+        nullptr
+    };
 
-    // Save real pointers BEFORE hooking anything in libandroid
-    real_AMotionEvent_getX = (float(*)(const AInputEvent*,size_t))
-                              dlsym(libandroid, "AMotionEvent_getX");
-    real_AMotionEvent_getY = (float(*)(const AInputEvent*,size_t))
-                              dlsym(libandroid, "AMotionEvent_getY");
+    void* sym = nullptr;
 
-    if (!real_AMotionEvent_getX || !real_AMotionEvent_getY) {
-        LOGE("[ENI] InstallMotionHooks: AMotionEvent_getX/Y not found in libandroid.so");
-        return;
-    }
-    LOGI("[ENI] real_AMotionEvent_getX=%p  real_AMotionEvent_getY=%p",
-         (void*)real_AMotionEvent_getX, (void*)real_AMotionEvent_getY);
-
-    void* sym_action = dlsym(libandroid, "AMotionEvent_getAction");
-    if (!sym_action) { LOGE("[ENI] AMotionEvent_getAction not found"); return; }
-
-    // Cross-instance guard: if Dobby already patched this address, skip
-    uint32_t firstWord = *(volatile uint32_t*)sym_action;
-    bool alreadyHooked = (firstWord == 0x580000D1) ||
-                         ((firstWord & 0xFC000000) == 0x14000000);
-    if (alreadyHooked) {
-        LOGI("[ENI] AMotionEvent_getAction already hooked — skip");
-        return;
+    // Try DobbySymbolResolver first (searches .dynsym)
+    for (int i = 0; SYMBOLS[i] && !sym; i++) {
+        sym = DobbySymbolResolver("libunity.so", SYMBOLS[i]);
+        if (sym) LOGI("[ENI] Found nativeInjectEvent via DobbySymbolResolver[%d]", i);
     }
 
-    int r = DobbyHook(sym_action,
-                      (void*)hook_AMotionEvent_getAction,
-                      (void**)&orig_AMotionEvent_getAction);
-    LOGI("[ENI] AMotionEvent_getAction hook: %s (addr=%p)", r==0?"OK":"FAIL", sym_action);
+    // Fallback: dlsym (requires library to be open in this namespace)
+    if (!sym) {
+        void* unity = dlopen("libunity.so", RTLD_LAZY | RTLD_NOLOAD);
+        if (unity) {
+            for (int i = 0; SYMBOLS[i] && !sym; i++) {
+                sym = dlsym(unity, SYMBOLS[i]);
+                if (sym) LOGI("[ENI] Found nativeInjectEvent via dlsym[%d]", i);
+            }
+        }
+    }
+
+    if (!sym) {
+        LOGE("[ENI] nativeInjectEvent NOT FOUND in libunity.so — touch will not work");
+        return;
+    }
+
+    int r = DobbyHook(sym, (void*)hook_nativeInjectEvent,
+                      (void**)&orig_nativeInjectEvent);
+    LOGI("[ENI] nativeInjectEvent hook: %s @ %p", r==0?"OK":"FAIL", sym);
 }
 
-// ════════════════════════════════════════════════════════════════
-//  FlushTouchToImGui — dipanggil SETIAP frame dari hook_eglSwapBuffers
-//  SEBELUM ImGui::NewFrame()
-// ════════════════════════════════════════════════════════════════
+// ── FlushTouchToImGui — call every frame from hook_eglSwapBuffers ─────────────
+// BEFORE ImGui::NewFrame()
 static void FlushTouchToImGui() {
-    uint64_t packed = g_touchPacked.exchange(0, std::memory_order_acquire);
+    uint32_t packed = g_touchBuf.exchange(0, std::memory_order_acquire);
     if (!packed) return;
 
-    TouchSample s = UnpackTouch(packed);
+    TS s = UnpackTouch(packed);
     if (!s.valid) return;
 
     ImGuiIO& io = ImGui::GetIO();
-
-    // ← THE MISSING PIECE: tell ImGui this is a touchscreen event
-    // Without this, ImGui interprets touch as mouse and gets confused
-    // about button state transitions (DOWN fires but UP is ignored, etc.)
     io.AddMouseSourceEvent(ImGuiMouseSource_TouchScreen);
     io.AddMousePosEvent(s.x, s.y);
-
-    if (s.action == AMOTION_EVENT_ACTION_DOWN ||
-        s.action == AMOTION_EVENT_ACTION_MOVE) {
-        io.AddMouseButtonEvent(0, true);
-    } else { // ACTION_UP
-        io.AddMouseButtonEvent(0, false);
-    }
+    io.AddMouseButtonEvent(0, s.down);
 }
 
-// ════════════════════════════════════════════════════════════════
-//  CustomAndroidNewFrame — replaces ImGui_ImplAndroid_NewFrame()
-//  Tidak butuh ANativeWindow — pakai g_width/g_height dari EGL.
-//  Handles DisplaySize + DeltaTime saja.
-// ════════════════════════════════════════════════════════════════
+// ── CustomAndroidNewFrame — replaces ImGui_ImplAndroid_NewFrame() ─────────────
 static void CustomAndroidNewFrame() {
     ImGuiIO& io = ImGui::GetIO();
-
-    // Display size — updated every frame from eglQuerySurface
     io.DisplaySize             = ImVec2((float)g_width, (float)g_height);
     io.DisplayFramebufferScale = ImVec2(1.0f, 1.0f);
 
-    // DeltaTime
     static auto s_last = std::chrono::steady_clock::now();
     auto now = std::chrono::steady_clock::now();
     float dt = std::chrono::duration<float>(now - s_last).count();
     io.DeltaTime = (dt > 0.f && dt < 1.f) ? dt : (1.f / 60.f);
     s_last = now;
 }
-
-#include <EGL/egl.h>
-#include <android/native_window.h>
-#include <dlfcn.h>
-#include <atomic>
-#include <pthread.h>
-#include <fcntl.h>
-#include <unistd.h>
-#include <dirent.h>
-#include <linux/input.h>
-#include <sys/ioctl.h>
-#include <cstring>
-#include <cstdio>
-#include "imgui.h"
-#include "backends/imgui_impl_android.h"
