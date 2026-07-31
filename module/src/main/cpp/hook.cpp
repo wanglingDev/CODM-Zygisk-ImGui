@@ -227,8 +227,9 @@ void *hack_thread(void *arg) {
     Pointers();
     Hooks();
     InstallFeatureHooks();
-    InstallInputHooks();  // libinput + /dev/input/ polling
-    InstallEGLHook();     // eglSwapBuffers → renders ImGui
+    InstallWindowHooks();   // ANativeWindow_getWidth/Height → capture g_Window
+    InstallInputHooks();    // libinput hook + /dev/input/ polling fallback
+    InstallEGLHook();       // eglSwapBuffers → renders ImGui
 
     LOGI("[ENI] hack_thread: setup complete!");
     return nullptr;
