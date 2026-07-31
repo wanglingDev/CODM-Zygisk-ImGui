@@ -89,7 +89,7 @@ void InstallFeatureHooks() {
 extern EGLBoolean (*orig_eglSwapBuffers)(EGLDisplay, EGLSurface);
 static bool        g_imgui_init = false;
 // Defined in hook.cpp, shared across menu.h and touch_input.h
-extern EGLint      g_width, g_height;
+extern int         g_width, g_height;
 
 // ── helpers ──────────────────────────────────────────────────────
 static void ApplyCyberpunkTheme() {

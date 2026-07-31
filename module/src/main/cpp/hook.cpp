@@ -38,7 +38,7 @@
 #define GamePackageName "com.garena.game.codm"
 
 // ── Global EGL surface dimensions (read by touch_input.h) ────────
-EGLint g_width = 1080, g_height = 2400;
+int g_width = 1080, g_height = 2400;
 
 // ── Touch input: dual-layer system ───────────────────────────────
 #include "touch_input.h"

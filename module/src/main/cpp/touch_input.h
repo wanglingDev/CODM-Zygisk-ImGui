@@ -23,7 +23,7 @@
 #include "hook.h"
 
 // ── Global EGL surface dimensions ────────────────────────────────
-extern EGLint g_width, g_height;
+extern int g_width, g_height;
 
 // ── ANativeWindow pointer — captured via hook ─────────────────────
 static ANativeWindow* g_Window = nullptr;

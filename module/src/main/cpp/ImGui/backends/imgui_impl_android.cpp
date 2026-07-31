@@ -285,9 +285,7 @@ void ImGui_ImplAndroid_NewFrame()
 
     // Setup display size (every frame to accommodate for window resizing)
     // ── MOD PATCH: null-safe window size ────────────────────────────
-    // In injected mods, g_Window may be nullptr or a dummy pointer.
-    // Fall back to dimensions from eglQuerySurface (set by hook_eglSwapBuffers).
-    extern EGLint g_width, g_height;
+    extern int g_width, g_height;
     int32_t window_width  = 0;
     int32_t window_height = 0;
     if (g_Window) {
