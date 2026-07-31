@@ -130,21 +130,8 @@ static void RunAllBypasses() {
 extern EGLBoolean hook_eglSwapBuffers(EGLDisplay dpy, EGLSurface surface);
 static EGLBoolean (*orig_eglSwapBuffers)(EGLDisplay, EGLSurface) = nullptr;
 
-// libinput hook — primary input path
-HOOKAF(void, Input, void* thiz, void* ex_ab, void* ex_ac) {
-    origInput(thiz, ex_ab, ex_ac);
-    ImGui_ImplAndroid_HandleInputEvent((AInputEvent*)thiz);
-}
-
-HOOKAF(int32_t, Consume, void* thiz, void* arg1, bool arg2, long arg3,
-       uint32_t* arg4, AInputEvent** input_event) {
-    auto result = origConsume(thiz, arg1, arg2, arg3, arg4, input_event);
-    if (result == 0 && *input_event)
-        ImGui_ImplAndroid_HandleInputEvent(*input_event);
-    return result;
-}
-
-static bool g_libinput_hooked = false;
+// libinput + /dev/input removed — AMotionEvent_getAction hook handles everything.
+// See touch_input.h: InstallMotionHooks() + FlushTouchToImGui()
 
 static void InstallEGLHook() {
     void* libegl = dlopen("libEGL.so", RTLD_LAZY | RTLD_NOLOAD);
@@ -152,39 +139,15 @@ static void InstallEGLHook() {
     if (!libegl) { LOGE("[ENI] libEGL dlopen failed"); return; }
     void* sym = dlsym(libegl, "eglSwapBuffers");
     if (!sym) { LOGE("[ENI] eglSwapBuffers not found"); return; }
+
+    // Cross-instance guard — prevent 5× hook chain from Zygisk multi-load
+    uint32_t firstWord = *(volatile uint32_t*)sym;
+    bool alreadyHooked = (firstWord == 0x580000D1) ||
+                         ((firstWord & 0xFC000000) == 0x14000000);
+    if (alreadyHooked) { LOGI("[ENI] eglSwapBuffers already hooked — skip"); return; }
+
     int r = DobbyHook(sym, (void*)hook_eglSwapBuffers, (void**)&orig_eglSwapBuffers);
     LOGI("[ENI] eglSwapBuffers hook: %s (addr=%p)", r==0?"OK":"FAIL", sym);
-}
-
-static void InstallInputHooks() {
-    void* libinput = TryOpenLibinput();
-    if (libinput) {
-        // initializeMotionEvent — called once per event, most reliable
-        const char* sym1 = "_ZN7android13InputConsumer21initializeMotionEventEPNS_11MotionEventEPKNS_12InputMessageE";
-        void* f1 = dlsym(libinput, sym1);
-        if (f1) {
-            int r = DobbyHook(f1, (void*)myInput, (void**)&origInput);
-            LOGI("[ENI] initializeMotionEvent hook: %s", r==0?"OK":"FAIL");
-            if (r == 0) g_libinput_hooked = true;
-        }
-
-        // consume — backup path
-        const char* sym2 = "_ZN7android13InputConsumer7consumeEPNS_26InputEventFactoryInterfaceEblPjPPNS_10InputEventE";
-        void* f2 = dlsym(libinput, sym2);
-        if (f2) {
-            int r = DobbyHook(f2, (void*)myConsume, (void**)&origConsume);
-            LOGI("[ENI] consume hook: %s", r==0?"OK":"FAIL");
-            if (r == 0) g_libinput_hooked = true;
-        }
-
-        if (!g_libinput_hooked)
-            LOGE("[ENI] libinput found but syms not hooked — falling back to /dev/input");
-    } else {
-        LOGI("[ENI] libinput not found on any path — using /dev/input/ polling");
-    }
-
-    // Always start /dev/input/ polling as supplementary/fallback
-    StartTouchPollThread();
 }
 
 #include "functions.h"
@@ -228,7 +191,7 @@ void *hack_thread(void *arg) {
     Hooks();
     InstallFeatureHooks();
     InstallWindowHooks();   // ANativeWindow_getWidth/Height → capture g_Window
-    InstallInputHooks();    // libinput hook + /dev/input/ polling fallback
+    InstallMotionHooks();   // AMotionEvent_getAction hook → FlushTouchToImGui() per-frame
     InstallEGLHook();       // eglSwapBuffers → renders ImGui
 
     LOGI("[ENI] hack_thread: setup complete!");
