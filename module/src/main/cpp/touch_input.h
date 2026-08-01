@@ -1,165 +1,112 @@
-/**
- * touch_input.h — Unity nativeInjectEvent hook (confirmed working method)
- *
- * Why AMotionEvent_getAction from libandroid.so never worked:
- *   Unity on Android processes touch via Java android.view.MotionEvent,
- *   dispatched through com.unity3d.player.UnityPlayer.onTouchEvent() →
- *   nativeInjectEvent(). The NDK AInputEvent C API (AMotionEvent_getAction etc.)
- *   is NOT called by Unity — only NativeActivity games use it.
- *
- * Correct approach (confirmed from Unity crash traces + working mods):
- *   Hook Java_com_unity3d_player_UnityPlayer_nativeInjectEvent__Landroid_view_InputEvent_2
- *   directly in libunity.so using DobbySymbolResolver. Every touch Unity receives
- *   passes through this JNI bridge exactly once. Read X/Y/action via JNI MotionEvent
- *   methods, buffer atomically, flush to ImGui IO each frame from eglSwapBuffers.
- */
 #pragma once
-#include <jni.h>
+// ════════════════════════════════════════════════════════════════
+//  TOUCH INPUT — AMotionEvent_getX/Y/Action hook (libandroid.so)
+//
+//  Why this works:
+//  • libandroid.so always present, never moved to APEX
+//  • Unity (and every Android game) calls AMotionEvent_get* for input
+//  • Coordinates already in screen space — no scaling needed
+//  • AddMouseSourceEvent(TouchScreen) required for ImGui to register taps
+//  • Thread-safe: atomic staging, flushed from render thread
+// ════════════════════════════════════════════════════════════════
 #include <android/input.h>
 #include <dlfcn.h>
 #include <atomic>
-#include <chrono>
-#include <cstring>
 #include "imgui.h"
 #include "dobby.h"
 #include "hook.h"
 
 extern int g_width, g_height;
 
-// ── Lock-free single-slot touch buffer ───────────────────────────────────────
-// Packs: valid(1) | down(1) | y(15) | x(15) = 32 bits
-// 15-bit coords → max 32767 px, enough for any phone screen
-static std::atomic<uint32_t> g_touchBuf{0};
+// ── Staging area (written by input thread, read by render thread) ─
+static std::atomic<float> g_t_x{0.f};
+static std::atomic<float> g_t_y{0.f};
+static std::atomic<bool>  g_t_down{false};
+static std::atomic<int>   g_t_gen{0};      // increments each event
+static std::atomic<int>   g_t_flushed{0};  // last gen we flushed
 
-static inline uint32_t PackTouch(float x, float y, bool down, bool valid) {
-    uint16_t ix = (uint16_t)std::max(0.f, std::min(x, 32767.f));
-    uint16_t iy = (uint16_t)std::max(0.f, std::min(y, 32767.f));
-    return ((uint32_t)(valid?1:0) << 31) |
-           ((uint32_t)(down ?1:0) << 30) |
-           ((uint32_t)(iy & 0x7FFF) << 15) |
-           (uint32_t)(ix & 0x7FFF);
-}
-struct TS { float x,y; bool down,valid; };
-static inline TS UnpackTouch(uint32_t v) {
-    return { (float)(v & 0x7FFF), (float)((v>>15)&0x7FFF),
-             (bool)((v>>30)&1),   (bool)((v>>31)&1) };
-}
+// ── Original function pointers ────────────────────────────────────
+static float    (*orig_getX)(const AInputEvent*, size_t) = nullptr;
+static float    (*orig_getY)(const AInputEvent*, size_t) = nullptr;
+static int32_t  (*orig_getAction)(const AInputEvent*)    = nullptr;
 
-// ── Cached JNI method IDs (set once on first call) ───────────────────────────
-static jmethodID g_mid_getAction = nullptr;
-static jmethodID g_mid_getX      = nullptr;
-static jmethodID g_mid_getY      = nullptr;
-static jclass    g_motionCls     = nullptr;
-
-static void CacheMotionMethods(JNIEnv* env) {
-    if (g_mid_getAction) return;
-    jclass cls = env->FindClass("android/view/MotionEvent");
-    if (!cls) return;
-    g_motionCls     = (jclass)env->NewGlobalRef(cls);
-    g_mid_getAction = env->GetMethodID(g_motionCls, "getAction", "()I");
-    g_mid_getX      = env->GetMethodID(g_motionCls, "getX",      "()F");
-    g_mid_getY      = env->GetMethodID(g_motionCls, "getY",      "()F");
-    env->DeleteLocalRef(cls);
-    LOGI("[ENI] MotionEvent JNI methods cached");
+// ── Hooks ─────────────────────────────────────────────────────────
+static float hook_getX(const AInputEvent* ev, size_t idx) {
+    float x = orig_getX(ev, idx);
+    if (idx == 0) g_t_x.store(x, std::memory_order_relaxed);
+    return x;
 }
 
-// ── nativeInjectEvent hook ────────────────────────────────────────────────────
-typedef jboolean (*NativeInjectFn)(JNIEnv*, jobject, jobject);
-static NativeInjectFn orig_nativeInjectEvent = nullptr;
-
-static jboolean hook_nativeInjectEvent(JNIEnv* env, jobject thiz, jobject inputEvent) {
-    if (inputEvent && ImGui::GetCurrentContext()) {
-        CacheMotionMethods(env);
-
-        if (g_motionCls && g_mid_getAction &&
-            env->IsInstanceOf(inputEvent, g_motionCls)) {
-
-            jint  action = env->CallIntMethod(inputEvent, g_mid_getAction);
-            jfloat x     = env->CallFloatMethod(inputEvent, g_mid_getX);
-            jfloat y     = env->CallFloatMethod(inputEvent, g_mid_getY);
-            int    act   = action & 0xFF;
-
-            bool down = (act == AMOTION_EVENT_ACTION_DOWN ||
-                         act == AMOTION_EVENT_ACTION_MOVE ||
-                         act == 5); // POINTER_DOWN
-
-            // Buffer the event (render thread reads it via FlushTouchToImGui)
-            g_touchBuf.store(PackTouch(x, y, down, true),
-                             std::memory_order_release);
-
-            // If ImGui is consuming touch, don't pass to game
-            if (ImGui::GetIO().WantCaptureMouse) {
-                return JNI_TRUE;
-            }
-        }
-    }
-    return orig_nativeInjectEvent ? orig_nativeInjectEvent(env, thiz, inputEvent)
-                                  : JNI_FALSE;
+static float hook_getY(const AInputEvent* ev, size_t idx) {
+    float y = orig_getY(ev, idx);
+    if (idx == 0) g_t_y.store(y, std::memory_order_relaxed);
+    return y;
 }
 
-// ── InstallMotionHooks — call once from hack_thread ───────────────────────────
+static int32_t hook_getAction(const AInputEvent* ev) {
+    int32_t action = orig_getAction(ev);
+    int masked = action & AMOTION_EVENT_ACTION_MASK;
+    bool down = (masked == AMOTION_EVENT_ACTION_DOWN ||
+                 masked == AMOTION_EVENT_ACTION_MOVE);
+    g_t_down.store(down, std::memory_order_relaxed);
+    g_t_gen.fetch_add(1, std::memory_order_release);
+    return action;
+}
+
+// ── Install hooks ─────────────────────────────────────────────────
+static bool g_motion_hooked = false;
+
 static void InstallMotionHooks() {
-    // Confirmed symbol names from Unity crash traces (JNI mangled + short form)
-    static const char* SYMBOLS[] = {
-        "Java_com_unity3d_player_UnityPlayer_nativeInjectEvent__Landroid_view_InputEvent_2",
-        "Java_com_unity3d_player_UnityPlayer_nativeInjectEvent",
-        "Java_com_unity3d_player_ReflectionHelper_nativeInjectEvent__Landroid_view_InputEvent_2",
-        nullptr
+    void* lib = dlopen("libandroid.so", RTLD_LAZY | RTLD_NOLOAD);
+    if (!lib) lib = dlopen("libandroid.so", RTLD_LAZY);
+    if (!lib) { LOGE("[ENI] libandroid.so not found!"); return; }
+
+    struct { const char* name; void* hook; void** orig; } hooks[] = {
+        {"AMotionEvent_getX",      (void*)hook_getX,      (void**)&orig_getX},
+        {"AMotionEvent_getY",      (void*)hook_getY,      (void**)&orig_getY},
+        {"AMotionEvent_getAction", (void*)hook_getAction, (void**)&orig_getAction},
     };
 
-    void* sym = nullptr;
-
-    // Try DobbySymbolResolver first (searches .dynsym)
-    for (int i = 0; SYMBOLS[i] && !sym; i++) {
-        sym = DobbySymbolResolver("libunity.so", SYMBOLS[i]);
-        if (sym) LOGI("[ENI] Found nativeInjectEvent via DobbySymbolResolver[%d]", i);
+    int ok = 0;
+    for (auto& h : hooks) {
+        void* sym = dlsym(lib, h.name);
+        if (!sym) { LOGE("[ENI] %s not found", h.name); continue; }
+        int r = DobbyHook(sym, h.hook, h.orig);
+        LOGI("[ENI] hook %s: %s", h.name, r==0?"OK":"FAIL");
+        if (r == 0) ok++;
     }
-
-    // Fallback: dlsym (requires library to be open in this namespace)
-    if (!sym) {
-        void* unity = dlopen("libunity.so", RTLD_LAZY | RTLD_NOLOAD);
-        if (unity) {
-            for (int i = 0; SYMBOLS[i] && !sym; i++) {
-                sym = dlsym(unity, SYMBOLS[i]);
-                if (sym) LOGI("[ENI] Found nativeInjectEvent via dlsym[%d]", i);
-            }
-        }
-    }
-
-    if (!sym) {
-        LOGE("[ENI] nativeInjectEvent NOT FOUND in libunity.so — touch will not work");
-        return;
-    }
-
-    int r = DobbyHook(sym, (void*)hook_nativeInjectEvent,
-                      (void**)&orig_nativeInjectEvent);
-    LOGI("[ENI] nativeInjectEvent hook: %s @ %p", r==0?"OK":"FAIL", sym);
+    g_motion_hooked = (ok > 0);
+    LOGI("[ENI] AMotionEvent hooks: %d/3 OK", ok);
 }
 
-// ── FlushTouchToImGui — call every frame from hook_eglSwapBuffers ─────────────
-// BEFORE ImGui::NewFrame()
-static void FlushTouchToImGui() {
-    uint32_t packed = g_touchBuf.exchange(0, std::memory_order_acquire);
-    if (!packed) return;
+// ── Flush pending touch to ImGui IO (call from render thread) ─────
+static inline void FlushTouchToImGui() {
+    int gen = g_t_gen.load(std::memory_order_acquire);
+    if (gen == g_t_flushed.load(std::memory_order_relaxed)) return;
+    g_t_flushed.store(gen, std::memory_order_relaxed);
 
-    TS s = UnpackTouch(packed);
-    if (!s.valid) return;
+    float x = g_t_x.load(std::memory_order_relaxed);
+    float y = g_t_y.load(std::memory_order_relaxed);
+    bool down = g_t_down.load(std::memory_order_relaxed);
 
     ImGuiIO& io = ImGui::GetIO();
+    // CRITICAL: tell ImGui this is a touchscreen event, not a mouse
     io.AddMouseSourceEvent(ImGuiMouseSource_TouchScreen);
-    io.AddMousePosEvent(s.x, s.y);
-    io.AddMouseButtonEvent(0, s.down);
+    io.AddMousePosEvent(x, y);
+    io.AddMouseButtonEvent(0, down);
 }
 
-// ── CustomAndroidNewFrame — replaces ImGui_ImplAndroid_NewFrame() ─────────────
-static void CustomAndroidNewFrame() {
+// ── Custom NewFrame: sets DisplaySize + DeltaTime without ANativeWindow ──
+static inline void CustomAndroidNewFrame(int w, int h) {
     ImGuiIO& io = ImGui::GetIO();
-    io.DisplaySize             = ImVec2((float)g_width, (float)g_height);
-    io.DisplayFramebufferScale = ImVec2(1.0f, 1.0f);
+    io.DisplaySize             = ImVec2((float)w, (float)h);
+    io.DisplayFramebufferScale = ImVec2(1.f, 1.f);
 
-    static auto s_last = std::chrono::steady_clock::now();
-    auto now = std::chrono::steady_clock::now();
-    float dt = std::chrono::duration<float>(now - s_last).count();
-    io.DeltaTime = (dt > 0.f && dt < 1.f) ? dt : (1.f / 60.f);
-    s_last = now;
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    static double s_prev = 0.0;
+    double now = (double)ts.tv_sec + ts.tv_nsec / 1e9;
+    io.DeltaTime = (s_prev > 0.0) ? (float)(now - s_prev) : 1.f/60.f;
+    if (io.DeltaTime <= 0.f) io.DeltaTime = 1.f/60.f;
+    s_prev = now;
 }

@@ -130,8 +130,7 @@ static void RunAllBypasses() {
 extern EGLBoolean hook_eglSwapBuffers(EGLDisplay dpy, EGLSurface surface);
 static EGLBoolean (*orig_eglSwapBuffers)(EGLDisplay, EGLSurface) = nullptr;
 
-// libinput + /dev/input removed — AMotionEvent_getAction hook handles everything.
-// See touch_input.h: InstallMotionHooks() + FlushTouchToImGui()
+// Input handled via AMotionEvent_getX/Y/Action hooks in touch_input.h
 
 static void InstallEGLHook() {
     void* libegl = dlopen("libEGL.so", RTLD_LAZY | RTLD_NOLOAD);
@@ -139,16 +138,11 @@ static void InstallEGLHook() {
     if (!libegl) { LOGE("[ENI] libEGL dlopen failed"); return; }
     void* sym = dlsym(libegl, "eglSwapBuffers");
     if (!sym) { LOGE("[ENI] eglSwapBuffers not found"); return; }
-
-    // Cross-instance guard — prevent 5× hook chain from Zygisk multi-load
-    uint32_t firstWord = *(volatile uint32_t*)sym;
-    bool alreadyHooked = (firstWord == 0x580000D1) ||
-                         ((firstWord & 0xFC000000) == 0x14000000);
-    if (alreadyHooked) { LOGI("[ENI] eglSwapBuffers already hooked — skip"); return; }
-
     int r = DobbyHook(sym, (void*)hook_eglSwapBuffers, (void**)&orig_eglSwapBuffers);
     LOGI("[ENI] eglSwapBuffers hook: %s (addr=%p)", r==0?"OK":"FAIL", sym);
 }
+
+
 
 #include "functions.h"
 #include "menu.h"
@@ -190,8 +184,7 @@ void *hack_thread(void *arg) {
     Pointers();
     Hooks();
     InstallFeatureHooks();
-    InstallWindowHooks();   // ANativeWindow_getWidth/Height → capture g_Window
-    InstallMotionHooks();   // AMotionEvent_getAction hook → FlushTouchToImGui() per-frame
+    InstallMotionHooks();   // AMotionEvent_getX/Y/Action from libandroid.so
     InstallEGLHook();       // eglSwapBuffers → renders ImGui
 
     LOGI("[ENI] hack_thread: setup complete!");

@@ -488,15 +488,11 @@ EGLBoolean hook_eglSwapBuffers(EGLDisplay display, EGLSurface surface) {
 
     ImGui::GetIO().DisplaySize = { (float)g_width, (float)g_height };
 
-    // ── Touch → ImGui (must happen before NewFrame) ───────────────
-    // Flushes buffered AMotionEvent_getAction sample with
-    // io.AddMouseSourceEvent(ImGuiMouseSource_TouchScreen) — the piece
-    // that was missing in all previous libinput / /dev/input approaches.
-    FlushTouchToImGui();
-
-    // ── Frame begin ───────────────────────────────────────────────
     ImGui_ImplOpenGL3_NewFrame();
-    CustomAndroidNewFrame();   // DisplaySize + DeltaTime, no ANativeWindow needed
+    // CustomAndroidNewFrame: no ANativeWindow needed — sets DisplaySize + DeltaTime
+    CustomAndroidNewFrame(g_width, g_height);
+    // Flush AMotionEvent hook data → ImGui IO (with TouchScreen source tag)
+    FlushTouchToImGui();
     ImGui::NewFrame();
 
     if (verbose) LOGI("[ENI] frame %d: DrawMenu", g_frame_count);
