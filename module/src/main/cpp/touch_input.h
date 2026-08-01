@@ -1,121 +1,152 @@
 #pragma once
 // ════════════════════════════════════════════════════════════════
-//  TOUCH INPUT — AMotionEvent_getX/Y/Action hook (libandroid.so)
+//  TOUCH INPUT — /dev/input/eventX polling dari render thread
 //
 //  Why this works:
-//  • libandroid.so always present, never moved to APEX
-//  • Unity (and every Android game) calls AMotionEvent_get* for input
-//  • Coordinates already in screen space — no scaling needed
-//  • AddMouseSourceEvent(TouchScreen) required for ImGui to register taps
-//  • Thread-safe: atomic staging, flushed from render thread
+//  • Bypass NDK/JNI layer sepenuhnya — baca langsung dari kernel
+//  • Non-blocking O_NONBLOCK: dipanggil tiap frame dari eglSwapBuffers
+//  • Semua ImGui IO calls dari render thread — zero race condition
+//  • Handle landscape rotation: swap X/Y jika needed
 // ════════════════════════════════════════════════════════════════
 #include <android/input.h>
-#include <dlfcn.h>
-#include <atomic>
+#include <linux/input.h>
+#include <sys/ioctl.h>
+#include <fcntl.h>
+#include <unistd.h>
+#include <dirent.h>
+#include <cstring>
+#include <cstdio>
+#include <cmath>
 #include "imgui.h"
-#include "dobby.h"
 #include "hook.h"
 
 extern int g_width, g_height;
 
-// ── Staging area (written by input thread, read by render thread) ─
-static std::atomic<float> g_t_x{0.f};
-static std::atomic<float> g_t_y{0.f};
-static std::atomic<bool>  g_t_down{false};
-static std::atomic<int>   g_t_gen{0};      // increments each event
-static std::atomic<int>   g_t_flushed{0};  // last gen we flushed
+static int   g_touch_fd       = -1;
+static float g_ax_min = 0, g_ax_rng = 1;
+static float g_ay_min = 0, g_ay_rng = 1;
+static bool  g_scale_init     = false;
+static int   g_touch_log_cnt  = 0;
 
-// ── Original function pointers ────────────────────────────────────
-static float    (*orig_getX)(const AInputEvent*, size_t) = nullptr;
-static float    (*orig_getY)(const AInputEvent*, size_t) = nullptr;
-static int32_t  (*orig_getAction)(const AInputEvent*)    = nullptr;
-
-// ── Hooks ─────────────────────────────────────────────────────────
-static float hook_getX(const AInputEvent* ev, size_t idx) {
-    float x = orig_getX(ev, idx);
-    if (idx == 0) g_t_x.store(x, std::memory_order_relaxed);
-    return x;
+static int FindTouchFd() {
+    DIR* d = opendir("/dev/input");
+    if (!d) return -1;
+    struct dirent* de;
+    while ((de = readdir(d)) != nullptr) {
+        if (strncmp(de->d_name, "event", 5)) continue;
+        char path[64];
+        snprintf(path, sizeof(path), "/dev/input/%s", de->d_name);
+        int fd = open(path, O_RDONLY | O_NONBLOCK);
+        if (fd < 0) continue;
+        char name[256] = {};
+        ioctl(fd, EVIOCGNAME(sizeof(name)-1), name);
+        uint8_t absbits[(ABS_MAX/8)+1] = {};
+        ioctl(fd, EVIOCGBIT(EV_ABS, sizeof(absbits)), absbits);
+        bool has_mt = (absbits[ABS_MT_POSITION_X/8] >> (ABS_MT_POSITION_X%8)) & 1;
+        if (has_mt) {
+            LOGI("[ENI] touchscreen: %s (\'%s\')", path, name);
+            closedir(d);
+            return fd;
+        }
+        close(fd);
+    }
+    closedir(d);
+    return -1;
 }
 
-static float hook_getY(const AInputEvent* ev, size_t idx) {
-    float y = orig_getY(ev, idx);
-    if (idx == 0) g_t_y.store(y, std::memory_order_relaxed);
-    return y;
+static void InitTouchScale() {
+    struct input_absinfo ax = {}, ay = {};
+    ioctl(g_touch_fd, EVIOCGABS(ABS_MT_POSITION_X), &ax);
+    ioctl(g_touch_fd, EVIOCGABS(ABS_MT_POSITION_Y), &ay);
+    g_ax_min = (float)ax.minimum;
+    g_ax_rng = (float)(ax.maximum - ax.minimum);
+    g_ay_min = (float)ay.minimum;
+    g_ay_rng = (float)(ay.maximum - ay.minimum);
+    if (g_ax_rng <= 0) g_ax_rng = 1;
+    if (g_ay_rng <= 0) g_ay_rng = 1;
+    LOGI("[ENI] touch scale: X[%.0f..%.0f] Y[%.0f..%.0f] screen:%dx%d",
+         g_ax_min, g_ax_min+g_ax_rng,
+         g_ay_min, g_ay_min+g_ay_rng,
+         g_width, g_height);
+    g_scale_init = true;
 }
-
-static int32_t hook_getAction(const AInputEvent* ev) {
-    int32_t action = orig_getAction(ev);
-    int masked = action & AMOTION_EVENT_ACTION_MASK;
-
-    // Pull X/Y from the SAME event — eliminates race condition with hook_getX/Y
-    if (orig_getX) g_t_x.store(orig_getX(ev, 0), std::memory_order_relaxed);
-    if (orig_getY) g_t_y.store(orig_getY(ev, 0), std::memory_order_relaxed);
-
-    bool down = (masked == AMOTION_EVENT_ACTION_DOWN ||
-                 masked == AMOTION_EVENT_ACTION_MOVE);
-    g_t_down.store(down, std::memory_order_relaxed);
-
-    // Increment gen AFTER all data is written
-    g_t_gen.fetch_add(1, std::memory_order_release);
-    return action;
-}
-
-// ── Install hooks ─────────────────────────────────────────────────
-static bool g_motion_hooked = false;
 
 static void InstallMotionHooks() {
-    void* lib = dlopen("libandroid.so", RTLD_LAZY | RTLD_NOLOAD);
-    if (!lib) lib = dlopen("libandroid.so", RTLD_LAZY);
-    if (!lib) { LOGE("[ENI] libandroid.so not found!"); return; }
-
-    struct { const char* name; void* hook; void** orig; } hooks[] = {
-        {"AMotionEvent_getX",      (void*)hook_getX,      (void**)&orig_getX},
-        {"AMotionEvent_getY",      (void*)hook_getY,      (void**)&orig_getY},
-        {"AMotionEvent_getAction", (void*)hook_getAction, (void**)&orig_getAction},
-    };
-
-    int ok = 0;
-    for (auto& h : hooks) {
-        void* sym = dlsym(lib, h.name);
-        if (!sym) { LOGE("[ENI] %s not found", h.name); continue; }
-        int r = DobbyHook(sym, h.hook, h.orig);
-        LOGI("[ENI] hook %s: %s", h.name, r==0?"OK":"FAIL");
-        if (r == 0) ok++;
+    g_touch_fd = FindTouchFd();
+    if (g_touch_fd < 0) {
+        LOGE("[ENI] /dev/input: no touchscreen found!");
+    } else {
+        LOGI("[ENI] /dev/input: fd=%d OK", g_touch_fd);
     }
-    g_motion_hooked = (ok > 0);
-    LOGI("[ENI] AMotionEvent hooks: %d/3 OK", ok);
 }
 
-// ── Flush pending touch to ImGui IO (call from render thread) ─────
-static int g_flush_log_count = 0;
-
+// ── Called every frame from hook_eglSwapBuffers — non-blocking ──
 static inline void FlushTouchToImGui() {
-    int gen = g_t_gen.load(std::memory_order_acquire);
-    if (gen == g_t_flushed.load(std::memory_order_relaxed)) return;
-    g_t_flushed.store(gen, std::memory_order_relaxed);
+    if (g_touch_fd < 0) return;
 
-    float x    = g_t_x.load(std::memory_order_relaxed);
-    float y    = g_t_y.load(std::memory_order_relaxed);
-    bool down  = g_t_down.load(std::memory_order_relaxed);
+    if (!g_scale_init) InitTouchScale();
 
-    // Log first 20 touch events so we can verify coords
-    if (g_flush_log_count < 20) {
-        LOGI("[ENI] touch flush: (%.0f, %.0f) down=%d gen=%d", x, y, (int)down, gen);
-        g_flush_log_count++;
+    struct input_event ev;
+    static float  cx = 0.f, cy = 0.f;
+    static bool   tracking = false;
+    static int    slot = 0;
+
+    // Drain all pending events in one shot
+    while (read(g_touch_fd, &ev, sizeof(ev)) == (ssize_t)sizeof(ev)) {
+        switch (ev.type) {
+        case EV_ABS:
+            if (ev.code == ABS_MT_SLOT) {
+                slot = ev.value;
+            }
+            if (slot != 0) break; // only track first finger
+
+            if (ev.code == ABS_MT_TRACKING_ID) {
+                tracking = (ev.value != -1);
+                if (!tracking) {
+                    ImGuiIO& io = ImGui::GetIO();
+                    io.AddMouseSourceEvent(ImGuiMouseSource_TouchScreen);
+                    io.AddMouseButtonEvent(0, false);
+                    if (g_touch_log_cnt < 30)
+                        LOGI("[ENI] touch UP (%.0f,%.0f)", cx, cy);
+                }
+            }
+
+            // Raw → screen coords
+            // If screen is landscape (width > height), swap X/Y axes
+            if (ev.code == ABS_MT_POSITION_X) {
+                float norm = (ev.value - g_ax_min) / g_ax_rng;
+                // landscape: raw X → screen X (or Y if rotated)
+                cx = norm * (float)(g_width > g_height ? g_width : g_height);
+            }
+            if (ev.code == ABS_MT_POSITION_Y) {
+                float norm = (ev.value - g_ay_min) / g_ay_rng;
+                cy = norm * (float)(g_width > g_height ? g_height : g_width);
+            }
+            break;
+
+        case EV_SYN:
+            if (ev.code == SYN_REPORT && slot == 0 && tracking) {
+                ImGuiIO& io = ImGui::GetIO();
+                io.AddMouseSourceEvent(ImGuiMouseSource_TouchScreen);
+                io.AddMousePosEvent(cx, cy);
+                io.AddMouseButtonEvent(0, true);
+
+                if (g_touch_log_cnt < 30) {
+                    LOGI("[ENI] touch DOWN (%.0f,%.0f) screen(%dx%d)",
+                         cx, cy, g_width, g_height);
+                    g_touch_log_cnt++;
+                }
+            }
+            break;
+        }
     }
-
-    ImGuiIO& io = ImGui::GetIO();
-    io.AddMouseSourceEvent(ImGuiMouseSource_TouchScreen);
-    io.AddMousePosEvent(x, y);
-    io.AddMouseButtonEvent(0, down);
 }
 
-// ── Custom NewFrame: sets DisplaySize + DeltaTime without ANativeWindow ──
+// ── CustomAndroidNewFrame: no ANativeWindow needed ────────────────
 static inline void CustomAndroidNewFrame(int w, int h) {
     ImGuiIO& io = ImGui::GetIO();
     io.DisplaySize             = ImVec2((float)w, (float)h);
     io.DisplayFramebufferScale = ImVec2(1.f, 1.f);
-
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
     static double s_prev = 0.0;
