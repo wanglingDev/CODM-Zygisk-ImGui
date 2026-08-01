@@ -1,34 +1,36 @@
 #pragma once
 // ════════════════════════════════════════════════════════════════
-//  TOUCH INPUT — /dev/input/eventX polling dari render thread
+//  TOUCH INPUT via Zygisk Companion (root) → game process
 //
-//  Why this works:
-//  • Bypass NDK/JNI layer sepenuhnya — baca langsung dari kernel
-//  • Non-blocking O_NONBLOCK: dipanggil tiap frame dari eglSwapBuffers
-//  • Semua ImGui IO calls dari render thread — zero race condition
-//  • Handle landscape rotation: swap X/Y jika needed
+//  Flow:
+//  1. Companion (root) opens /dev/input/eventX
+//  2. Sends fd to game process via SCM_RIGHTS ancillary msg
+//  3. Game process polls fd non-blocking from render thread
 // ════════════════════════════════════════════════════════════════
-#include <android/input.h>
 #include <linux/input.h>
 #include <sys/ioctl.h>
+#include <sys/socket.h>
+#include <sys/un.h>
+#include <sys/types.h>
 #include <fcntl.h>
 #include <unistd.h>
 #include <dirent.h>
 #include <cstring>
 #include <cstdio>
-#include <cmath>
 #include "imgui.h"
 #include "hook.h"
 
 extern int g_width, g_height;
 
-static int   g_touch_fd       = -1;
-static float g_ax_min = 0, g_ax_rng = 1;
-static float g_ay_min = 0, g_ay_rng = 1;
-static bool  g_scale_init     = false;
-static int   g_touch_log_cnt  = 0;
+static int   g_touch_fd      = -1;
+static float g_ax_min = 0,   g_ax_rng = 1;
+static float g_ay_min = 0,   g_ay_rng = 1;
+static bool  g_scale_init    = false;
+static int   g_log_cnt       = 0;
 
-static int FindTouchFd() {
+// ── Companion-side: open touchscreen, return fd ───────────────────
+// Called by companion_handler in main.cpp (runs as root)
+static int CompanionFindTouchFd() {
     DIR* d = opendir("/dev/input");
     if (!d) return -1;
     struct dirent* de;
@@ -44,8 +46,8 @@ static int FindTouchFd() {
         ioctl(fd, EVIOCGBIT(EV_ABS, sizeof(absbits)), absbits);
         bool has_mt = (absbits[ABS_MT_POSITION_X/8] >> (ABS_MT_POSITION_X%8)) & 1;
         if (has_mt) {
-            LOGI("[ENI] touchscreen: %s (\'%s\')", path, name);
             closedir(d);
+            LOGI("[ENI-companion] touchscreen: %s ('%s') fd=%d", path, name, fd);
             return fd;
         }
         close(fd);
@@ -54,87 +56,124 @@ static int FindTouchFd() {
     return -1;
 }
 
+// ── Send fd via SCM_RIGHTS ────────────────────────────────────────
+static bool SendFd(int sock, int fd) {
+    char buf[1] = {'F'};
+    struct iovec iov = { buf, 1 };
+    char cms_buf[CMSG_SPACE(sizeof(int))];
+    struct msghdr msg = {};
+    msg.msg_iov        = &iov;
+    msg.msg_iovlen     = 1;
+    msg.msg_control    = cms_buf;
+    msg.msg_controllen = sizeof(cms_buf);
+    struct cmsghdr* cms = CMSG_FIRSTHDR(&msg);
+    cms->cmsg_level = SOL_SOCKET;
+    cms->cmsg_type  = SCM_RIGHTS;
+    cms->cmsg_len   = CMSG_LEN(sizeof(int));
+    memcpy(CMSG_DATA(cms), &fd, sizeof(int));
+    return sendmsg(sock, &msg, 0) >= 0;
+}
+
+// ── Receive fd via SCM_RIGHTS ─────────────────────────────────────
+static int RecvFd(int sock) {
+    char buf[1];
+    struct iovec iov = { buf, 1 };
+    char cms_buf[CMSG_SPACE(sizeof(int))];
+    struct msghdr msg = {};
+    msg.msg_iov        = &iov;
+    msg.msg_iovlen     = 1;
+    msg.msg_control    = cms_buf;
+    msg.msg_controllen = sizeof(cms_buf);
+    if (recvmsg(sock, &msg, 0) < 0) return -1;
+    struct cmsghdr* cms = CMSG_FIRSTHDR(&msg);
+    if (!cms || cms->cmsg_type != SCM_RIGHTS) return -1;
+    int fd;
+    memcpy(&fd, CMSG_DATA(cms), sizeof(int));
+    return fd;
+}
+
+// ── Companion handler (called by Zygisk, runs as root) ───────────
+// Defined here, registered in main.cpp via REGISTER_ZYGISK_COMPANION
+static void HandleCompanion(int sock) {
+    int touch_fd = CompanionFindTouchFd();
+    if (touch_fd < 0) {
+        // Send -1 signal: write error byte
+        char err = 'E';
+        write(sock, &err, 1);
+        LOGI("[ENI-companion] no touchscreen found");
+        return;
+    }
+    // Send fd to game process
+    if (!SendFd(sock, touch_fd)) {
+        LOGI("[ENI-companion] SendFd failed");
+    }
+    close(touch_fd); // game process has its own fd now
+}
+
+// ── Game-side: receive fd from companion ─────────────────────────
 static void InitTouchScale() {
     struct input_absinfo ax = {}, ay = {};
     ioctl(g_touch_fd, EVIOCGABS(ABS_MT_POSITION_X), &ax);
     ioctl(g_touch_fd, EVIOCGABS(ABS_MT_POSITION_Y), &ay);
-    g_ax_min = (float)ax.minimum;
-    g_ax_rng = (float)(ax.maximum - ax.minimum);
-    g_ay_min = (float)ay.minimum;
-    g_ay_rng = (float)(ay.maximum - ay.minimum);
+    g_ax_min = ax.minimum; g_ax_rng = ax.maximum - ax.minimum;
+    g_ay_min = ay.minimum; g_ay_rng = ay.maximum - ay.minimum;
     if (g_ax_rng <= 0) g_ax_rng = 1;
     if (g_ay_rng <= 0) g_ay_rng = 1;
-    LOGI("[ENI] touch scale: X[%.0f..%.0f] Y[%.0f..%.0f] screen:%dx%d",
-         g_ax_min, g_ax_min+g_ax_rng,
-         g_ay_min, g_ay_min+g_ay_rng,
-         g_width, g_height);
+    LOGI("[ENI] touch scale: X[%.0f+%.0f] Y[%.0f+%.0f] screen:%dx%d",
+         g_ax_min, g_ax_rng, g_ay_min, g_ay_rng, g_width, g_height);
     g_scale_init = true;
 }
 
-static void InstallMotionHooks() {
-    g_touch_fd = FindTouchFd();
-    if (g_touch_fd < 0) {
-        LOGE("[ENI] /dev/input: no touchscreen found!");
+static void InstallMotionHooks(int companion_sock) {
+    g_touch_fd = RecvFd(companion_sock);
+    if (g_touch_fd >= 0) {
+        // Make non-blocking for render-thread polling
+        fcntl(g_touch_fd, F_SETFL, fcntl(g_touch_fd, F_GETFL) | O_NONBLOCK);
+        LOGI("[ENI] touch fd from companion: %d OK", g_touch_fd);
     } else {
-        LOGI("[ENI] /dev/input: fd=%d OK", g_touch_fd);
+        LOGE("[ENI] companion did not send touch fd");
     }
 }
 
-// ── Called every frame from hook_eglSwapBuffers — non-blocking ──
+// ── Poll events from render thread (non-blocking) ─────────────────
 static inline void FlushTouchToImGui() {
     if (g_touch_fd < 0) return;
-
     if (!g_scale_init) InitTouchScale();
 
     struct input_event ev;
-    static float  cx = 0.f, cy = 0.f;
-    static bool   tracking = false;
-    static int    slot = 0;
+    static float cx = 0.f, cy = 0.f;
+    static bool  tracking = false;
+    static int   slot = 0;
 
-    // Drain all pending events in one shot
     while (read(g_touch_fd, &ev, sizeof(ev)) == (ssize_t)sizeof(ev)) {
         switch (ev.type) {
         case EV_ABS:
-            if (ev.code == ABS_MT_SLOT) {
-                slot = ev.value;
-            }
-            if (slot != 0) break; // only track first finger
-
+            if (ev.code == ABS_MT_SLOT) { slot = ev.value; break; }
+            if (slot != 0) break;
             if (ev.code == ABS_MT_TRACKING_ID) {
                 tracking = (ev.value != -1);
                 if (!tracking) {
                     ImGuiIO& io = ImGui::GetIO();
                     io.AddMouseSourceEvent(ImGuiMouseSource_TouchScreen);
                     io.AddMouseButtonEvent(0, false);
-                    if (g_touch_log_cnt < 30)
-                        LOGI("[ENI] touch UP (%.0f,%.0f)", cx, cy);
                 }
             }
-
-            // Raw → screen coords
-            // If screen is landscape (width > height), swap X/Y axes
-            if (ev.code == ABS_MT_POSITION_X) {
-                float norm = (ev.value - g_ax_min) / g_ax_rng;
-                // landscape: raw X → screen X (or Y if rotated)
-                cx = norm * (float)(g_width > g_height ? g_width : g_height);
-            }
-            if (ev.code == ABS_MT_POSITION_Y) {
-                float norm = (ev.value - g_ay_min) / g_ay_rng;
-                cy = norm * (float)(g_width > g_height ? g_height : g_width);
-            }
+            if (ev.code == ABS_MT_POSITION_X)
+                cx = ((ev.value - g_ax_min) / g_ax_rng)
+                     * (float)(g_width > g_height ? g_width : g_height);
+            if (ev.code == ABS_MT_POSITION_Y)
+                cy = ((ev.value - g_ay_min) / g_ay_rng)
+                     * (float)(g_width > g_height ? g_height : g_width);
             break;
-
         case EV_SYN:
             if (ev.code == SYN_REPORT && slot == 0 && tracking) {
                 ImGuiIO& io = ImGui::GetIO();
                 io.AddMouseSourceEvent(ImGuiMouseSource_TouchScreen);
                 io.AddMousePosEvent(cx, cy);
                 io.AddMouseButtonEvent(0, true);
-
-                if (g_touch_log_cnt < 30) {
-                    LOGI("[ENI] touch DOWN (%.0f,%.0f) screen(%dx%d)",
-                         cx, cy, g_width, g_height);
-                    g_touch_log_cnt++;
+                if (g_log_cnt < 20) {
+                    LOGI("[ENI] touch (%.0f,%.0f)", cx, cy);
+                    g_log_cnt++;
                 }
             }
             break;
@@ -142,7 +181,6 @@ static inline void FlushTouchToImGui() {
     }
 }
 
-// ── CustomAndroidNewFrame: no ANativeWindow needed ────────────────
 static inline void CustomAndroidNewFrame(int w, int h) {
     ImGuiIO& io = ImGui::GetIO();
     io.DisplaySize             = ImVec2((float)w, (float)h);

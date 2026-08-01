@@ -184,7 +184,11 @@ void *hack_thread(void *arg) {
     Pointers();
     Hooks();
     InstallFeatureHooks();
-    InstallMotionHooks();   // AMotionEvent_getX/Y/Action from libandroid.so
+
+    // Get touch fd from companion (companion opened /dev/input/ as root)
+    extern int g_companion_sock;
+    InstallMotionHooks(g_companion_sock);
+
     InstallEGLHook();       // eglSwapBuffers → renders ImGui
 
     LOGI("[ENI] hack_thread: setup complete!");
