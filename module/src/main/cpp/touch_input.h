@@ -1,186 +1,109 @@
 #pragma once
 // ════════════════════════════════════════════════════════════════
-//  TOUCH INPUT via Zygisk Companion (root) → game process
+//  TOUCH INPUT via Zygisk hookJniNativeMethods
 //
-//  Flow:
-//  1. Companion (root) opens /dev/input/eventX
-//  2. Sends fd to game process via SCM_RIGHTS ancillary msg
-//  3. Game process polls fd non-blocking from render thread
+//  Proven approach used by ozMod, springmusk026, all working templates:
+//  Hook UnityPlayer.nativeInjectEvent → extract MotionEvent X/Y → ImGui
+//  Ref: github.com/ocornut/imgui/issues/6498
 // ════════════════════════════════════════════════════════════════
-#include <linux/input.h>
-#include <sys/ioctl.h>
-#include <sys/socket.h>
-#include <sys/un.h>
-#include <sys/types.h>
-#include <fcntl.h>
-#include <unistd.h>
-#include <dirent.h>
+#include <jni.h>
+#include <atomic>
 #include <cstring>
-#include <cstdio>
+#include <ctime>
 #include "imgui.h"
 #include "hook.h"
 
 extern int g_width, g_height;
 
-static int   g_touch_fd      = -1;
-static float g_ax_min = 0,   g_ax_rng = 1;
-static float g_ay_min = 0,   g_ay_rng = 1;
-static bool  g_scale_init    = false;
-static int   g_log_cnt       = 0;
+// ── Staging: JNI thread → render thread ──────────────────────────
+static std::atomic<float> g_t_x{0.f};
+static std::atomic<float> g_t_y{0.f};
+static std::atomic<int>   g_t_action{-1};  // 0=DOWN,1=UP,2=MOVE
+static std::atomic<int>   g_t_gen{0};
+static std::atomic<int>   g_t_flushed{0};
 
-// ── Companion-side: open touchscreen, return fd ───────────────────
-// Called by companion_handler in main.cpp (runs as root)
-static int CompanionFindTouchFd() {
-    DIR* d = opendir("/dev/input");
-    if (!d) return -1;
-    struct dirent* de;
-    while ((de = readdir(d)) != nullptr) {
-        if (strncmp(de->d_name, "event", 5)) continue;
-        char path[64];
-        snprintf(path, sizeof(path), "/dev/input/%s", de->d_name);
-        int fd = open(path, O_RDONLY | O_NONBLOCK);
-        if (fd < 0) continue;
-        char name[256] = {};
-        ioctl(fd, EVIOCGNAME(sizeof(name)-1), name);
-        uint8_t absbits[(ABS_MAX/8)+1] = {};
-        ioctl(fd, EVIOCGBIT(EV_ABS, sizeof(absbits)), absbits);
-        bool has_mt = (absbits[ABS_MT_POSITION_X/8] >> (ABS_MT_POSITION_X%8)) & 1;
-        if (has_mt) {
-            closedir(d);
-            LOGI("[ENI-companion] touchscreen: %s ('%s') fd=%d", path, name, fd);
-            return fd;
-        }
-        close(fd);
+// ── nativeInjectEvent hook ────────────────────────────────────────
+// Unity calls this for every touch/key event
+static jboolean hook_nativeInjectEvent(JNIEnv* env, jobject /*obj*/, jobject inputEvent) {
+    if (!inputEvent || !env) return JNI_FALSE;
+
+    jclass motionClass = env->FindClass("android/view/MotionEvent");
+    if (!motionClass || !env->IsInstanceOf(inputEvent, motionClass)) {
+        if (motionClass) env->DeleteLocalRef(motionClass);
+        return JNI_FALSE;
     }
-    closedir(d);
-    return -1;
-}
 
-// ── Send fd via SCM_RIGHTS ────────────────────────────────────────
-static bool SendFd(int sock, int fd) {
-    char buf[1] = {'F'};
-    struct iovec iov = { buf, 1 };
-    char cms_buf[CMSG_SPACE(sizeof(int))];
-    struct msghdr msg = {};
-    msg.msg_iov        = &iov;
-    msg.msg_iovlen     = 1;
-    msg.msg_control    = cms_buf;
-    msg.msg_controllen = sizeof(cms_buf);
-    struct cmsghdr* cms = CMSG_FIRSTHDR(&msg);
-    cms->cmsg_level = SOL_SOCKET;
-    cms->cmsg_type  = SCM_RIGHTS;
-    cms->cmsg_len   = CMSG_LEN(sizeof(int));
-    memcpy(CMSG_DATA(cms), &fd, sizeof(int));
-    return sendmsg(sock, &msg, 0) >= 0;
-}
+    jmethodID getAction = env->GetMethodID(motionClass, "getAction",       "()I");
+    jmethodID getX      = env->GetMethodID(motionClass, "getX",            "()F");
+    jmethodID getY      = env->GetMethodID(motionClass, "getY",            "()F");
 
-// ── Receive fd via SCM_RIGHTS ─────────────────────────────────────
-static int RecvFd(int sock) {
-    char buf[1];
-    struct iovec iov = { buf, 1 };
-    char cms_buf[CMSG_SPACE(sizeof(int))];
-    struct msghdr msg = {};
-    msg.msg_iov        = &iov;
-    msg.msg_iovlen     = 1;
-    msg.msg_control    = cms_buf;
-    msg.msg_controllen = sizeof(cms_buf);
-    if (recvmsg(sock, &msg, 0) < 0) return -1;
-    struct cmsghdr* cms = CMSG_FIRSTHDR(&msg);
-    if (!cms || cms->cmsg_type != SCM_RIGHTS) return -1;
-    int fd;
-    memcpy(&fd, CMSG_DATA(cms), sizeof(int));
-    return fd;
-}
-
-// ── Companion handler (called by Zygisk, runs as root) ───────────
-// Defined here, registered in main.cpp via REGISTER_ZYGISK_COMPANION
-static void HandleCompanion(int sock) {
-    int touch_fd = CompanionFindTouchFd();
-    if (touch_fd < 0) {
-        // Send -1 signal: write error byte
-        char err = 'E';
-        write(sock, &err, 1);
-        LOGI("[ENI-companion] no touchscreen found");
-        return;
+    if (!getAction || !getX || !getY) {
+        env->DeleteLocalRef(motionClass);
+        return JNI_FALSE;
     }
-    // Send fd to game process
-    if (!SendFd(sock, touch_fd)) {
-        LOGI("[ENI-companion] SendFd failed");
+
+    jint  action = env->CallIntMethod(inputEvent, getAction);
+    jfloat x     = env->CallFloatMethod(inputEvent, getX);
+    jfloat y     = env->CallFloatMethod(inputEvent, getY);
+    env->DeleteLocalRef(motionClass);
+
+    int masked = action & 0xFF; // AMOTION_EVENT_ACTION_MASK
+
+    g_t_x.store(x,      std::memory_order_relaxed);
+    g_t_y.store(y,      std::memory_order_relaxed);
+    g_t_action.store(masked, std::memory_order_relaxed);
+    g_t_gen.fetch_add(1, std::memory_order_release);
+
+    static int log_cnt = 0;
+    if (log_cnt < 20) {
+        LOGI("[ENI] nativeInjectEvent: action=%d (%.0f,%.0f)", masked, (float)x, (float)y);
+        log_cnt++;
     }
-    close(touch_fd); // game process has its own fd now
+
+    return JNI_FALSE; // return false = don't consume (game still gets event)
 }
 
-// ── Game-side: receive fd from companion ─────────────────────────
-static void InitTouchScale() {
-    struct input_absinfo ax = {}, ay = {};
-    ioctl(g_touch_fd, EVIOCGABS(ABS_MT_POSITION_X), &ax);
-    ioctl(g_touch_fd, EVIOCGABS(ABS_MT_POSITION_Y), &ay);
-    g_ax_min = ax.minimum; g_ax_rng = ax.maximum - ax.minimum;
-    g_ay_min = ay.minimum; g_ay_rng = ay.maximum - ay.minimum;
-    if (g_ax_rng <= 0) g_ax_rng = 1;
-    if (g_ay_rng <= 0) g_ay_rng = 1;
-    LOGI("[ENI] touch scale: X[%.0f+%.0f] Y[%.0f+%.0f] screen:%dx%d",
-         g_ax_min, g_ax_rng, g_ay_min, g_ay_rng, g_width, g_height);
-    g_scale_init = true;
+// ── Install via Zygisk hookJniNativeMethods ───────────────────────
+// Must be called from postAppSpecialize (has valid env + api)
+// zygisk::Api* passed in from CodmMod
+static void InstallNativeInjectHook(zygisk::Api* api, JNIEnv* env) {
+    // Try both known signatures Unity uses across versions
+    JNINativeMethod methods[] = {
+        {"nativeInjectEvent", "(Landroid/view/InputEvent;)Z",  (void*)hook_nativeInjectEvent},
+        {"nativeInjectEvent", "(Landroid/view/InputEvent;)V",  (void*)hook_nativeInjectEvent},
+        {"injectInputEvent",  "(Landroid/view/InputEvent;II)Z",(void*)hook_nativeInjectEvent},
+    };
+    // hookJniNativeMethods will only hook methods that actually exist
+    api->hookJniNativeMethods(env, "com/unity3d/player/UnityPlayer", methods, 3);
+    LOGI("[ENI] hookJniNativeMethods: nativeInjectEvent registered");
 }
 
-static void InstallMotionHooks(int companion_sock) {
-    g_touch_fd = RecvFd(companion_sock);
-    if (g_touch_fd >= 0) {
-        // Make non-blocking for render-thread polling
-        fcntl(g_touch_fd, F_SETFL, fcntl(g_touch_fd, F_GETFL) | O_NONBLOCK);
-        LOGI("[ENI] touch fd from companion: %d OK", g_touch_fd);
-    } else {
-        LOGE("[ENI] companion did not send touch fd");
-    }
+// ── Called from install path in hack_thread (after api gone) ─────
+// Fallback: not needed when Zygisk hook is installed
+static void InstallMotionHooks(int /*companion_sock*/) {
+    LOGI("[ENI] InstallMotionHooks: using Zygisk JNI hook (no-op here)");
 }
 
-// ── Poll events from render thread (non-blocking) ─────────────────
+// ── Flush from render thread (hook_eglSwapBuffers) ────────────────
 static inline void FlushTouchToImGui() {
-    if (g_touch_fd < 0) return;
-    if (!g_scale_init) InitTouchScale();
+    int gen = g_t_gen.load(std::memory_order_acquire);
+    if (gen == g_t_flushed.load(std::memory_order_relaxed)) return;
+    g_t_flushed.store(gen, std::memory_order_relaxed);
 
-    struct input_event ev;
-    static float cx = 0.f, cy = 0.f;
-    static bool  tracking = false;
-    static int   slot = 0;
+    float  x      = g_t_x.load(std::memory_order_relaxed);
+    float  y      = g_t_y.load(std::memory_order_relaxed);
+    int    action = g_t_action.load(std::memory_order_relaxed);
 
-    while (read(g_touch_fd, &ev, sizeof(ev)) == (ssize_t)sizeof(ev)) {
-        switch (ev.type) {
-        case EV_ABS:
-            if (ev.code == ABS_MT_SLOT) { slot = ev.value; break; }
-            if (slot != 0) break;
-            if (ev.code == ABS_MT_TRACKING_ID) {
-                tracking = (ev.value != -1);
-                if (!tracking) {
-                    ImGuiIO& io = ImGui::GetIO();
-                    io.AddMouseSourceEvent(ImGuiMouseSource_TouchScreen);
-                    io.AddMouseButtonEvent(0, false);
-                }
-            }
-            if (ev.code == ABS_MT_POSITION_X)
-                cx = ((ev.value - g_ax_min) / g_ax_rng)
-                     * (float)(g_width > g_height ? g_width : g_height);
-            if (ev.code == ABS_MT_POSITION_Y)
-                cy = ((ev.value - g_ay_min) / g_ay_rng)
-                     * (float)(g_width > g_height ? g_height : g_width);
-            break;
-        case EV_SYN:
-            if (ev.code == SYN_REPORT && slot == 0 && tracking) {
-                ImGuiIO& io = ImGui::GetIO();
-                io.AddMouseSourceEvent(ImGuiMouseSource_TouchScreen);
-                io.AddMousePosEvent(cx, cy);
-                io.AddMouseButtonEvent(0, true);
-                if (g_log_cnt < 20) {
-                    LOGI("[ENI] touch (%.0f,%.0f)", cx, cy);
-                    g_log_cnt++;
-                }
-            }
-            break;
-        }
-    }
+    ImGuiIO& io = ImGui::GetIO();
+    io.AddMouseSourceEvent(ImGuiMouseSource_TouchScreen);
+    io.AddMousePosEvent(x, y);
+
+    // 0=DOWN, 2=MOVE → pressed; 1=UP → released
+    bool down = (action == 0 || action == 2);
+    io.AddMouseButtonEvent(0, down);
 }
 
+// ── CustomAndroidNewFrame: no ANativeWindow needed ─────────────────
 static inline void CustomAndroidNewFrame(int w, int h) {
     ImGuiIO& io = ImGui::GetIO();
     io.DisplaySize             = ImVec2((float)w, (float)h);
