@@ -6,6 +6,17 @@
 #include "zygisk.hpp"
 #include "touch_input.h"
 
+// ── nativeInjectEvent hook (needs zygisk::Api + JNI scope) ───────
+static void InstallNativeInjectHook(zygisk::Api* api, JNIEnv* env) {
+    JNINativeMethod methods[] = {
+        {"nativeInjectEvent", "(Landroid/view/InputEvent;)Z",  (void*)hook_nativeInjectEvent},
+        {"nativeInjectEvent", "(Landroid/view/InputEvent;)V",  (void*)hook_nativeInjectEvent},
+        {"injectInputEvent",  "(Landroid/view/InputEvent;II)Z",(void*)hook_nativeInjectEvent},
+    };
+    api->hookJniNativeMethods(env, "com/unity3d/player/UnityPlayer", methods, 3);
+    LOGI("[ENI] hookJniNativeMethods: nativeInjectEvent registered");
+}
+
 static std::atomic<bool> s_started{false};
 extern int g_companion_sock;
 

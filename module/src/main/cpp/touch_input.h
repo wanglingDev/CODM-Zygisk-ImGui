@@ -63,25 +63,10 @@ static jboolean hook_nativeInjectEvent(JNIEnv* env, jobject /*obj*/, jobject inp
     return JNI_FALSE; // return false = don't consume (game still gets event)
 }
 
-// ── Install via Zygisk hookJniNativeMethods ───────────────────────
-// Must be called from postAppSpecialize (has valid env + api)
-// zygisk::Api* passed in from CodmMod
-static void InstallNativeInjectHook(zygisk::Api* api, JNIEnv* env) {
-    // Try both known signatures Unity uses across versions
-    JNINativeMethod methods[] = {
-        {"nativeInjectEvent", "(Landroid/view/InputEvent;)Z",  (void*)hook_nativeInjectEvent},
-        {"nativeInjectEvent", "(Landroid/view/InputEvent;)V",  (void*)hook_nativeInjectEvent},
-        {"injectInputEvent",  "(Landroid/view/InputEvent;II)Z",(void*)hook_nativeInjectEvent},
-    };
-    // hookJniNativeMethods will only hook methods that actually exist
-    api->hookJniNativeMethods(env, "com/unity3d/player/UnityPlayer", methods, 3);
-    LOGI("[ENI] hookJniNativeMethods: nativeInjectEvent registered");
-}
-
-// ── Called from install path in hack_thread (after api gone) ─────
-// Fallback: not needed when Zygisk hook is installed
-static void InstallMotionHooks(int /*companion_sock*/) {
-    LOGI("[ENI] InstallMotionHooks: using Zygisk JNI hook (no-op here)");
+// InstallNativeInjectHook is defined in main.cpp (needs zygisk::Api scope)
+// InstallMotionHooks is a no-op here — hook done via Zygisk in postAppSpecialize
+static void InstallMotionHooks(int /*sock*/) {
+    LOGI("[ENI] touch: using Zygisk nativeInjectEvent hook");
 }
 
 // ── Flush from render thread (hook_eglSwapBuffers) ────────────────
