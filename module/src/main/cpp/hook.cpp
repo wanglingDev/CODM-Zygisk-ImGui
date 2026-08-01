@@ -39,6 +39,7 @@
 
 // ── Global EGL surface dimensions (read by touch_input.h) ────────
 int g_width = 1080, g_height = 2400;
+int g_companion_sock = -1; // defined here, extern in main.cpp
 
 // ── Touch input: dual-layer system ───────────────────────────────
 #include "touch_input.h"
@@ -185,8 +186,7 @@ void *hack_thread(void *arg) {
     Hooks();
     InstallFeatureHooks();
 
-    // Get touch fd from companion (companion opened /dev/input/ as root)
-    extern int g_companion_sock;
+    // Get touch fd from companion
     InstallMotionHooks(g_companion_sock);
 
     InstallEGLHook();       // eglSwapBuffers → renders ImGui

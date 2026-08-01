@@ -9,7 +9,7 @@
 
 // ── Thread spawner ────────────────────────────────────────────────
 static std::atomic<bool> s_started{false};
-static int g_companion_sock = -1;
+extern int g_companion_sock; // defined in hook.cpp
 
 struct HackArgs { int sock; };
 
