@@ -13,6 +13,7 @@
  *  Symbol confirmed from Unity crash traces:
  *    Java_com_unity3d_player_UnityPlayer_nativeInjectEvent__Landroid_view_InputEvent_2
  */
+#include <algorithm>
 #include <jni.h>
 #include <android/input.h>
 #include <dlfcn.h>
