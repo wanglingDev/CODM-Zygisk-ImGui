@@ -46,9 +46,16 @@ static float hook_getY(const AInputEvent* ev, size_t idx) {
 static int32_t hook_getAction(const AInputEvent* ev) {
     int32_t action = orig_getAction(ev);
     int masked = action & AMOTION_EVENT_ACTION_MASK;
+
+    // Pull X/Y from the SAME event — eliminates race condition with hook_getX/Y
+    if (orig_getX) g_t_x.store(orig_getX(ev, 0), std::memory_order_relaxed);
+    if (orig_getY) g_t_y.store(orig_getY(ev, 0), std::memory_order_relaxed);
+
     bool down = (masked == AMOTION_EVENT_ACTION_DOWN ||
                  masked == AMOTION_EVENT_ACTION_MOVE);
     g_t_down.store(down, std::memory_order_relaxed);
+
+    // Increment gen AFTER all data is written
     g_t_gen.fetch_add(1, std::memory_order_release);
     return action;
 }
@@ -80,17 +87,24 @@ static void InstallMotionHooks() {
 }
 
 // ── Flush pending touch to ImGui IO (call from render thread) ─────
+static int g_flush_log_count = 0;
+
 static inline void FlushTouchToImGui() {
     int gen = g_t_gen.load(std::memory_order_acquire);
     if (gen == g_t_flushed.load(std::memory_order_relaxed)) return;
     g_t_flushed.store(gen, std::memory_order_relaxed);
 
-    float x = g_t_x.load(std::memory_order_relaxed);
-    float y = g_t_y.load(std::memory_order_relaxed);
-    bool down = g_t_down.load(std::memory_order_relaxed);
+    float x    = g_t_x.load(std::memory_order_relaxed);
+    float y    = g_t_y.load(std::memory_order_relaxed);
+    bool down  = g_t_down.load(std::memory_order_relaxed);
+
+    // Log first 20 touch events so we can verify coords
+    if (g_flush_log_count < 20) {
+        LOGI("[ENI] touch flush: (%.0f, %.0f) down=%d gen=%d", x, y, (int)down, gen);
+        g_flush_log_count++;
+    }
 
     ImGuiIO& io = ImGui::GetIO();
-    // CRITICAL: tell ImGui this is a touchscreen event, not a mouse
     io.AddMouseSourceEvent(ImGuiMouseSource_TouchScreen);
     io.AddMousePosEvent(x, y);
     io.AddMouseButtonEvent(0, down);
