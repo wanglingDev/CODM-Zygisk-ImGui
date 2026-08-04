@@ -492,7 +492,7 @@ EGLBoolean hook_eglSwapBuffers(EGLDisplay display, EGLSurface surface) {
     // CustomAndroidNewFrame: no ANativeWindow needed — sets DisplaySize + DeltaTime
     CustomAndroidNewFrame(g_width, g_height);
     // Flush AMotionEvent hook data → ImGui IO (with TouchScreen source tag)
-    FlushTouchToImGui();
+    FlushTouchFromJNI();
     ImGui::NewFrame();
 
     if (verbose) LOGI("[ENI] frame %d: DrawMenu", g_frame_count);

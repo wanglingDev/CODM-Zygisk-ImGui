@@ -42,7 +42,7 @@ int g_width = 1080, g_height = 2400;
 int g_companion_sock = -1; // defined here, extern in main.cpp
 
 // ── Touch input: dual-layer system ───────────────────────────────
-#include "touch_input.h"
+#include "input_hook.h"
 
 // ══════════════════════════════════════════════════════════════════
 //  BYPASS
@@ -187,7 +187,7 @@ void *hack_thread(void *arg) {
     InstallFeatureHooks();
 
     // Get touch fd from companion
-    InstallMotionHooks(g_companion_sock);
+    // Input hooked via JNI RegisterNatives (input_hook.h/JNI_OnLoad)
 
     InstallEGLHook();       // eglSwapBuffers → renders ImGui
 
