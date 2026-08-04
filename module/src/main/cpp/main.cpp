@@ -6,6 +6,16 @@
 #include "zygisk.hpp"
 #include "touch_input.h"
 
+// ── nativeInjectEvent hook (needs zygisk::Api + JNI scope) ───────
+static void InstallNativeInjectHook(zygisk::Api* api, JNIEnv* env) {
+    JNINativeMethod methods[] = {
+        {"nativeInjectEvent", "(Landroid/view/InputEvent;)Z",  (void*)hook_nativeInjectEvent},
+        {"nativeInjectEvent", "(Landroid/view/InputEvent;)V",  (void*)hook_nativeInjectEvent},
+        {"injectInputEvent",  "(Landroid/view/InputEvent;II)Z",(void*)hook_nativeInjectEvent},
+    };
+    api->hookJniNativeMethods(env, "com/unity3d/player/UnityPlayer", methods, 3);
+    LOGI("[ENI] hookJniNativeMethods: nativeInjectEvent registered");
+}
 
 static std::atomic<bool> s_started{false};
 extern int g_companion_sock;
@@ -31,18 +41,23 @@ public:
 
     void preAppSpecialize(zygisk::AppSpecializeArgs* args) override {
         const char* pkg = env->GetStringUTFChars(args->nice_name, nullptr);
-        isTarget = pkg && strcmp(pkg, "com.garena.game.codm") == 0;
+        // Log ALL process names so we can see what CODM spawns
+        LOGI("[ENI] preAppSpecialize: nice_name='%s'", pkg ? pkg : "null");
+        isTarget = pkg && strstr(pkg, "com.garena.game.codm") != nullptr;
         if (pkg) env->ReleaseStringUTFChars(args->nice_name, pkg);
         if (!isTarget) api->setOption(zygisk::Option::DLCLOSE_MODULE_LIBRARY);
-        else LOGI("[ENI] Zygisk: target detected");
+        else LOGI("[ENI] Zygisk: TARGET detected!");
     }
 
     void postAppSpecialize(const zygisk::AppSpecializeArgs*) override {
         if (!isTarget) return;
-
-        LOGI("[ENI] Zygisk: postAppSpecialize → spawning hack_thread");
+        LOGI("[ENI] postAppSpecialize: installing JNI hook...");
+        InstallNativeInjectHook(api, env);
+        LOGI("[ENI] postAppSpecialize: spawning hack_thread");
         spawn_once(-1);
     }
+
+
 
 private:
     zygisk::Api* api   = nullptr;

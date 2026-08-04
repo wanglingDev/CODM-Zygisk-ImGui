@@ -1,4 +1,3 @@
-#include <cinttypes>
 #pragma once
 
 // Forward declarations — defined in menu.h (included after this file in hook.cpp)
