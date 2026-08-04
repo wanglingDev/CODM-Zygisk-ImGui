@@ -489,8 +489,19 @@ EGLBoolean hook_eglSwapBuffers(EGLDisplay display, EGLSurface surface) {
     ImGui::GetIO().DisplaySize = { (float)g_width, (float)g_height };
 
     ImGui_ImplOpenGL3_NewFrame();
-    // CustomAndroidNewFrame: no ANativeWindow needed — sets DisplaySize + DeltaTime
-    CustomAndroidNewFrame(g_width, g_height);
+    // CustomAndroidNewFrame: sets DisplaySize + DeltaTime without ANativeWindow
+    {
+        ImGuiIO& io = ImGui::GetIO();
+        io.DisplaySize             = ImVec2((float)g_width, (float)g_height);
+        io.DisplayFramebufferScale = ImVec2(1.f, 1.f);
+        struct timespec ts;
+        clock_gettime(CLOCK_MONOTONIC, &ts);
+        static double s_prev = 0.0;
+        double now = (double)ts.tv_sec + ts.tv_nsec / 1e9;
+        io.DeltaTime = (s_prev > 0.0) ? (float)(now - s_prev) : 1.f/60.f;
+        if (io.DeltaTime <= 0.f) io.DeltaTime = 1.f/60.f;
+        s_prev = now;
+    }
     // Flush AMotionEvent hook data → ImGui IO (with TouchScreen source tag)
     FlushTouchFromJNI();
     ImGui::NewFrame();
